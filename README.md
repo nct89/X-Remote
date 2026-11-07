@@ -147,13 +147,22 @@ shasum -a 256 <file>
 
 | File | SHA-256 |
 |---|---|
-| `X-Remote-x86_64.AppImage` | `85b87680235c3eced5dc6d799a3dc2dbcf29e5ddf127069ea5b91bfaf5d2c083` |
-| `x-remote_0.1.0_amd64.deb` | `28c98fafa2bdb24990d4205706d918d5f4a801b1af5e2f80b28a0e877579d445` |
-| `x-remote-0.1.0-1.fc44.x86_64.rpm` | `2be098d6125a02386274df7c8a338864f92e614ad9b35ba9eba99f363ef54263` |
-| `x-remote-0.1.0-linux-x86_64.tar.gz` | `d8ac675040e4300c7bfdbc62528b0b73467a67a1a685a6447123ba7a04bc793a` |
-| `X-Remote-0.1.0-macos-universal.dmg` | `44ba3a7667c2c26a600624a9f23cb321fa2d660b0964d5d0c1bf6e05cd26711d` |
+| `X-Remote-x86_64.AppImage` | `dcc58ffd7f01af6046ec3d4b0a1d5580ce691493554d5f2a5d8d38c652267bb4` |
+| `x-remote_0.1.0_amd64.deb` | `cf25dcd9d129a79171b76b1e1619893c4236e0116b8650e7ef10b42c7bd4671f` |
+| `x-remote-0.1.0-1.fc44.x86_64.rpm` | `64d0ed3aeac49f7fd4ba1dd9c83773e018b399790e5d1a811ba133a6ff42ec7d` |
+| `x-remote-0.1.0-linux-x86_64.tar.gz` | `6675e7f140527432bead094abdaac89215db100c8884e05c342dd8120677fd81` |
+| `X-Remote-0.1.0-macos-universal.dmg` | `482c3a73ff9f71f3981671eb3a16c7f67bc7902033aa34b0367039703637acae` |
 
 GitHub also prints each file's SHA-256 on the release page.
+
+## Privacy
+
+To register and connect, X-Remote sends the remote-desktop service a machine identifier
+derived from the disk model/serial/firmware, a MAC-shaped hardware id, the host name, the
+user name and the local IP address. When hosting it asks the operating system for screen
+capture and input control. The app keeps its host ID, connection history and a short log in
+`~/.config/x-remote/` (directory `0700`, files `0600`). The first launch downloads a service
+key over HTTPS with normal certificate validation and caches it there for six hours.
 
 ## License
 
