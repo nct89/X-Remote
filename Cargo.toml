@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/proto", "crates/agent", "crates/client", "crates/engine", "crates/mock", "crates/uvsession"]
+# `uvagent` is a Windows-only helper (Win32 FFI); keep it out of the default build so the
+# workspace builds on Linux/macOS. On Windows build it with `cargo build -p uvagent`.
+default-members = ["crates/proto", "crates/client", "crates/engine", "crates/mock", "crates/uvsession"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

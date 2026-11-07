@@ -1,0 +1,22 @@
+﻿[package]
+name = "uvsession"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aes = "0.8"
+cbc = "0.1"
+cipher = { version = "0.4", features = ["alloc"] }
+md-5 = "0.10"
+des = "0.8"
+zstd = "0.13"
+rand = "0.8"
+libc = "0.2"
+jpeg-encoder = "0.6"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+
+# Chụp màn hình + bơm input phía host chỉ có trên Linux (X11).
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["xtest", "shm", "shape"] }

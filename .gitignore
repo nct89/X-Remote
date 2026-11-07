@@ -1,0 +1,32 @@
+# Rust build output
+/target
+**/target
+
+# Packaged installers
+/dist
+
+# Python caches (dev scripts)
+__pycache__/
+*.pyc
+
+# Packet captures / binary dumps
+*.pcap
+*.pcapng
+
+# Per-user runtime state (never commit)
+host_id
+own_id
+uid
+host.lock
+host.log
+*.log
+
+# Third-party / proprietary assets (supply your own)
+8bit.dat
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
