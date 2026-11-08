@@ -147,11 +147,11 @@ shasum -a 256 <file>
 
 | File | SHA-256 |
 |---|---|
-| `X-Remote-x86_64.AppImage` | `ec6eb5ea7b6dfcfcb0309d49cab05f8a1ed28fbfeea1a0a58576a1fa9402aab9` |
-| `x-remote_0.1.0_amd64.deb` | `35af1363ec0f370bd28d4bebec2cee1bb9985778d260d56ea60b5a737bcc956b` |
-| `x-remote-0.1.0-1.fc44.x86_64.rpm` | `b53403ad0800817cbbba6df99ba8873cdfdfa3cf3883bf141a516bac86114ba3` |
-| `x-remote-0.1.0-linux-x86_64.tar.gz` | `74c01e61217b1479b01477fe39e30fb7736c086b6f62b6e5edbe3c6063432a06` |
-| `X-Remote-0.1.0-macos-universal.dmg` | `eb78439ba92b318bbc8a2f3b4ce4674ffb5ae7213041f8ad1fe0dd8692587676` |
+| `X-Remote-x86_64.AppImage` | `4bd309c195d94aa6a16e2aa9515c84353ed582de8173317db7c136e53047ad31` |
+| `x-remote_0.1.0_amd64.deb` | `9847ad4617f42d0b0f473993855e4deb006b867d861aa5d7fc02ae27f6b2e1bb` |
+| `x-remote-0.1.0-1.fc44.x86_64.rpm` | `e14af384e9cf234d694284566e87b92ce9790b7448f34e7b57c2209a061e8d42` |
+| `x-remote-0.1.0-linux-x86_64.tar.gz` | `e612ce5e63ac0817912da3cf884d70d7e3935a6e8d0a6b900a36e6ab7f415f56` |
+| `X-Remote-0.1.0-macos-universal.dmg` | `c15f9a665f4b560c36e723358bf0b55abc3369b798e90f366c31a8924610c169` |
 
 GitHub also prints each file's SHA-256 on the release page.
 
