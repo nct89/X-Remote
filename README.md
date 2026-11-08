@@ -151,7 +151,7 @@ shasum -a 256 <file>
 | `x-remote_0.1.0_amd64.deb` | `60d117cf387f5510fd2081e1d104cfc4c27be5e0d2d1fb40b76a072951fbcab3` |
 | `x-remote-0.1.0-1.fc44.x86_64.rpm` | `6319fb201b55e403d521b275c4dcfd4a4aadf07029d6172cea0b6d93901a444c` |
 | `x-remote-0.1.0-linux-x86_64.tar.gz` | `c6b441492bc539abe1d577a8638c8caf0c6d9c2b1beddee5f4e21ae53b767464` |
-| `X-Remote-0.1.0-macos-universal.dmg` | `85a7804248fb92b41fe993f2f3c60b5d62bbe81ceca2df7ab5b9322067feed7b` |
+| `X-Remote-0.1.0-macos-universal.dmg` | `3293a5b379a7a829b9d6715eaef742e66b9675d4bd22b92e5f1f61d6a5a23658` |
 
 GitHub also prints each file's SHA-256 on the release page.
 
