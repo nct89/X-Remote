@@ -21,9 +21,9 @@ Tải bản mới nhất tại [trang Releases](https://github.com/nct89/X-Remot
 |---|---|
 | macOS | `X-Remote-0.1.0-macos-universal.dmg` |
 | Linux | `X-Remote-x86_64.AppImage` |
-| Linux | `x-remote_0.1.2_amd64.deb` |
-| Linux | `x-remote-0.1.2-1.x86_64.rpm` |
-| Linux | `x-remote-0.1.2-linux-x86_64.tar.gz` |
+| Linux | `x-remote_0.1.3_amd64.deb` |
+| Linux | `x-remote-0.1.3-1.x86_64.rpm` |
+| Linux | `x-remote-0.1.3-linux-x86_64.tar.gz` |
 
 Gói Linux cần glibc 2.35 trở lên (Ubuntu 22.04, 24.04, 26.04 và các bản tương đương).
 
@@ -47,20 +47,20 @@ chmod +x X-Remote-x86_64.AppImage
 #### Debian / Ubuntu 22.04+ / Linux Mint / Pop!_OS
 
 ```sh
-sudo apt install ./x-remote_0.1.2_amd64.deb
+sudo apt install ./x-remote_0.1.3_amd64.deb
 ```
 
 #### Fedora / RHEL / Rocky Linux / AlmaLinux
 
 ```sh
-sudo dnf install ./x-remote-0.1.2-1.x86_64.rpm
+sudo dnf install ./x-remote-0.1.3-1.x86_64.rpm
 ```
 
 #### Tarball di động — cài vào `~/.local`, không cần quyền root
 
 ```sh
-tar xf x-remote-0.1.2-linux-x86_64.tar.gz
-./x-remote-0.1.2-linux-x86_64/install.sh
+tar xf x-remote-0.1.3-linux-x86_64.tar.gz
+./x-remote-0.1.3-linux-x86_64/install.sh
 ```
 
 Sau đó chạy lệnh `x-remote` (thêm `~/.local/bin` vào `PATH` nếu cần).
