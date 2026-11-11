@@ -40,7 +40,8 @@ echo "==> flatpak-builder"
 REPO="$STAGE/repo"
 cd "$FP"
 # shellcheck disable=SC2086
-$BUILDER --user --install-deps-from=flathub --force-clean --repo="$REPO" \
+# --disable-cache: the local archive has no checksum, so a cached build would ignore source changes.
+$BUILDER --user --install-deps-from=flathub --force-clean --disable-cache --repo="$REPO" \
     --state-dir="$FP/.flatpak-builder" "$STAGE/app" "$FP/$APP_ID.yml"
 
 mkdir -p "$DIST"
