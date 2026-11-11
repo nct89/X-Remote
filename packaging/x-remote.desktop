@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=X-Remote
+Comment=Control a Windows machine through UltraViewer
+Exec=x-remote
+Icon=x-remote
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;ultraviewer;desktop;
+StartupNotify=true
+StartupWMClass=x-remote

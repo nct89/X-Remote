@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.xremote.app</id>
+  <name>X-Remote</name>
+  <summary>Control a Windows machine through UltraViewer</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      A small native remote-desktop client. Connect by ID and password, stream
+      the remote screen, and forward mouse and keyboard.
+    </p>
+  </description>
+  <launchable type="desktop-id">x-remote.desktop</launchable>
+  <url type="homepage">https://github.com</url>
+  <provides>
+    <binary>x-remote</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>RemoteAccess</category>
+  </categories>
+</component>

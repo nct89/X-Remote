@@ -1,0 +1,22 @@
+[package]
+name = "uvclient"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+uvproto = { path = "../proto" }
+uvsession = { path = "../uvsession" }
+serde_json = "1"
+eframe = "0.31"
+jpeg-decoder = "0.3"
+jpeg-encoder = "0.6"
+zip = { version = "3", default-features = false, features = ["deflate-flate2"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shape"] }
+# File picker through xdg-desktop-portal (used inside Flatpak, where zenity/kdialog do not exist).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }

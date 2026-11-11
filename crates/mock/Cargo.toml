@@ -1,0 +1,14 @@
+[package]
+name = "uvmock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# A cross-platform fake agent: serves a synthetic animated screen and speaks the
+# full control protocol, so the client can be exercised end-to-end on Linux/macOS
+# without a Windows guest. Test tooling only — not shipped.
+
+[dependencies]
+uvproto = { path = "../proto" }
+serde_json = "1"
+jpeg-encoder = "0.6"

@@ -1,0 +1,19 @@
+[package]
+name = "uvengine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+des = "0.8"
+sha1 = "0.10"
+md-5 = "0.10"
+digest = "0.10"
+rand = "0.8"
+base64 = "0.22"
+rustls = "0.23"
+rustls-pki-types = "1"
+
+[dev-dependencies]
