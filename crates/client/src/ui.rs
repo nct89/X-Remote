@@ -191,11 +191,20 @@ pub struct App {
     fullscreen: bool,
     /// Skip aspect-lock for a few frames after an explicit resize.
     ratio_skip: u8,
+    /// View just changed: keep sending this size until the OS window matches.
+    /// Without it, the session opens at the ID-window size and disconnect
+    /// leaves the ID window at the expanded session size (zoom survives).
+    hold_size: Option<egui::Vec2>,
+    hold_left: u8,
     /// Last minimum size sent, in points. A new command is sent only when it changes.
     min_ratio: [f32; 2],
     /// `set_zoom_factor` takes effect next frame; then pin inner size to the design
     /// so Linux actually redraws (same-size `InnerSize` is ignored there).
     zoom_pending: bool,
+    /// “Giới thiệu” is a separate OS window, not a line inside the ID window.
+    about_open: bool,
+    /// The about viewport has been created at least once (macOS hides it; Linux closes it).
+    about_made: bool,
     /// Keyboard focus was taken for the picture (so typing works as soon as the session starts).
     got_focus: bool,
 
@@ -266,6 +275,7 @@ pub struct App {
 
     /// Chat window with the controller is open.
     chat_open: bool,
+    chat_last_open: bool,
     /// The chat window has been created at least once. macOS must not destroy
     /// that window mid-frame (dropping NSWindow inside the event loop hangs the app).
     chat_made: bool,
@@ -350,8 +360,12 @@ impl App {
             quality: 60,
             fullscreen: false,
             ratio_skip: 0,
+            hold_size: None,
+            hold_left: 0,
             min_ratio: [0.0, 0.0],
             zoom_pending: false,
+            about_open: false,
+            about_made: false,
             got_focus: false,
             pending_connect: false,
             shot_path: None,
@@ -389,6 +403,7 @@ impl App {
             host,
             // Hidden until a session exists; opens when a session starts (see `chat_panel`).
             chat_open: false,
+            chat_last_open: false,
             chat_made: false,
             had_sess: false,
             draft: String::new(),
@@ -584,7 +599,7 @@ impl App {
                 self.tone = Tone::Ok;
                 // Like an UltraViewer session: widen the window, or the session toolbar
                 // loses buttons inside the 276 px connect column.
-                self.resize_win(ctx, SESS_SIZE[0], SESS_SIZE[1]);
+                self.force_window(ctx, SESS_SIZE[0], SESS_SIZE[1]);
             }
             Err(e) => {
                 self.status = format!("Không kết nối được engine: {e}");
@@ -610,7 +625,7 @@ impl App {
                 format!("Đang kết nối UltraViewer tới {id} …")
             };
             self.tone = Tone::Ok;
-            self.resize_win(ctx, SESS_SIZE[0], SESS_SIZE[1]);
+            self.force_window(ctx, SESS_SIZE[0], SESS_SIZE[1]);
         }
     }
 
@@ -694,18 +709,38 @@ impl App {
             self.fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
-        self.resize_win(ctx, WIN_SIZE[0], WIN_SIZE[1]);
+        self.force_window(ctx, WIN_SIZE[0], WIN_SIZE[1]);
         self.return_focus(ctx);
         self.status = "Đã ngắt kết nối".into();
         self.tone = Tone::Warn;
     }
 
-    /// Resize the window: narrow like UltraViewer's left column while entering info,
-    /// wider once a session is open.
-    fn resize_win(&mut self, ctx: &egui::Context, width: f32, height: f32) {
-        // The next frames must not immediately overwrite this size with the aspect lock.
-        self.ratio_skip = 3;
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, height)));
+    /// Switch to one view's design size and drop the other view's zoom.
+    ///
+    /// Both screens share one OS window. A leftover zoom, plus a minimum size
+    /// taken from the session, kept the session at the ID-window size and kept
+    /// the ID window at the expanded session size after disconnect.
+    fn force_window(&mut self, ctx: &egui::Context, width: f32, height: f32) {
+        ctx.set_zoom_factor(1.0);
+        self.zoom_pending = false;
+        let size = egui::vec2(width, height);
+        self.hold_size = Some(size);
+        self.hold_left = 90;
+        self.ratio_skip = 0;
+        let floor = egui::vec2(WIN_SIZE[0], WIN_SIZE[1]);
+        self.min_ratio = [floor.x, floor.y];
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(floor));
+        // Still draggable. Width and height stay in ratio; the layout zooms.
+        // The cap is the monitor, so a previous hard lock cannot stick.
+        let cap = ctx
+            .input(|i| i.viewport().monitor_size)
+            .unwrap_or(egui::vec2(8192.0, 8192.0));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(cap));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        if ctx.input(|i| i.viewport().maximized == Some(true)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
     }
 
     /// Keep the current screen's aspect ratio. Dragging a corner or maximizing
@@ -714,9 +749,28 @@ impl App {
         if self.fullscreen || ctx.input(|i| i.viewport().fullscreen == Some(true)) {
             return;
         }
+        if let Some(want) = self.hold_size {
+            // Keep zoom at 1 and repeat the size. One InnerSize is ignored on
+            // Linux, and the next ratio pass would adopt the previous view's
+            // pixels as the new zoom.
+            ctx.set_zoom_factor(1.0);
+            let floor = egui::vec2(WIN_SIZE[0], WIN_SIZE[1]);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(floor));
+            let ready = ctx.input(|i| i.viewport().inner_rect).is_some_and(|r| {
+                let s = r.size();
+                (s.x - want.x).abs() < 3.0 && (s.y - want.y).abs() < 3.0
+            });
+            if ready || self.hold_left == 0 {
+                self.hold_size = None;
+                return;
+            }
+            self.hold_left = self.hold_left.saturating_sub(1);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
+            return;
+        }
         let design = match self.view {
             View::Connect => egui::vec2(WIN_SIZE[0], WIN_SIZE[1]),
-            View::Session => egui::vec2(SESS_SIZE[0], SESS_SIZE[1]),
+            View::Session => self.ses_design(ctx),
         };
         let zoom = ctx.zoom_factor().max(0.05);
         let monitor = ctx.input(|i| i.viewport().monitor_size);
@@ -1051,7 +1105,12 @@ impl App {
                 Inbound::Frame(k) => newest = Some(k),
                 Inbound::Event(ev) => self.on_event(ctx, ev),
                 Inbound::Monitors(m) => {
+                    let was_empty = self.monitors.is_empty();
                     self.monitors = m;
+                    if was_empty && self.monitors.len() > 1 {
+                        // Default to the primary display, not the combined canvas.
+                        self.mon_ix = Some(0);
+                    }
                     if self.mon_ix.is_some_and(|i| i >= self.monitors.len()) {
                         self.mon_ix = None;
                     }
@@ -1128,26 +1187,16 @@ impl App {
             self.texture = None;
             self.ping_wait = None;
             self.lag_ms = None;
-            if self.engine.is_some() || self.uv.is_some() {
-                // Keep the session screen and retry with growing delay, instead of
-                // throwing the user back to the home screen.
-                self.reconnect_tries += 1;
-                let backoff = 500 * self.reconnect_tries.min(10) as u64;
-                self.reconnect_at =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(backoff));
-                self.status = format!(
-                    "Mất kết nối ({why}) — thử lại sau {:.1} s (lần {})",
-                    backoff as f32 / 1000.0,
-                    self.reconnect_tries
-                );
-                self.tone = Tone::Warn;
-            } else {
-                self.view = View::Connect;
-                self.resize_win(ctx, WIN_SIZE[0], WIN_SIZE[1]);
-                self.return_focus(ctx);
-                self.status = format!("Mất kết nối: {why}");
-                self.tone = Tone::Err;
-            }
+            // No auto-reconnect (UltraViewer does not retry on its own): back to the form.
+            self.uv = None;
+            self.engine = None;
+            self.reconnect_at = None;
+            self.reconnect_tries = 0;
+            self.view = View::Connect;
+            self.force_window(ctx, WIN_SIZE[0], WIN_SIZE[1]);
+            self.return_focus(ctx);
+            self.status = format!("Không kết nối được: {why}");
+            self.tone = Tone::Err;
         }
     }
 }
@@ -1595,6 +1644,44 @@ fn dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 4.5, color);
 }
 
+/// One status line clipped to the width it is given. No hover tooltip.
+fn fit_line(ui: &mut egui::Ui, text: &str, color: Color32, size: f32) {
+    let width = ui.available_width().max(8.0);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(size),
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: width,
+        max_rows: 1,
+        break_anywhere: false,
+        overflow_character: Some('…'),
+    };
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let h = galley.size().y.max(16.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    let y = rect.center().y - galley.size().y * 0.5;
+    ui.painter().galley(egui::pos2(rect.left(), y), galley, color);
+}
+
+fn os_label() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "Linux"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
+    } else {
+        "Khác"
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 impl eframe::App for App {
@@ -1666,7 +1753,15 @@ impl eframe::App for App {
                         }
                         // One status line, changes with the situation (like UltraViewer):
                         //   Ready -> Connecting... -> Being controlled -> Connection lost.
-                        let (tt, tone) = {
+                        let (tt, tone) = if self.view == View::Session && self.texture.is_some() && self.uv.is_some() {
+                            let os = match self.peer_os.as_str() {
+                                "linux" => "Linux",
+                                "macos" => "macOS",
+                                _ => "Windows",
+                            };
+                            let prod = if self.peer_os == "windows" { "UltraViewer" } else { "X-Remote" };
+                            (format!("Phiên {} {} ({})", group_id(&self.clean_id()), prod, os), Tone::Ok)
+                        } else {
                             let host = self.host.lock().unwrap();
                             if host.serving {
                                 ("Đang bị điều khiển".to_string(), Tone::Ok)
@@ -1686,11 +1781,21 @@ impl eframe::App for App {
                             Tone::Err => RED,
                         };
                         dot(ui, color);
-                        ui.add(
-                            egui::Label::new(RichText::new(&tt).size(12.0).color(TEXT))
-                                .truncate(),
-                        )
-                        .on_hover_text(&tt);
+                        if self.view == View::Connect {
+                            // No hover tooltip. `Label::truncate` draws one that is
+                            // wider than this window and runs off the right edge.
+                            fit_line(ui, &tt, TEXT, 12.0);
+                        } else {
+                            let status_line = ui.add(
+                                egui::Label::new(RichText::new(&tt).size(12.0).color(TEXT))
+                                    .truncate(),
+                            );
+                            status_line.on_hover_ui(|ui| {
+                                let cap = ui.ctx().screen_rect().width().min(360.0).max(80.0);
+                                ui.set_max_width(cap);
+                                ui.label(tt.as_str());
+                            });
+                        }
                     });
                 });
             });
@@ -1700,6 +1805,7 @@ impl eframe::App for App {
             View::Session => self.session_view(ctx),
         }
         self.chat_panel(ctx);
+        self.about_window(ctx);
         self.lock_ratio(ctx);
     }
 }
@@ -2189,9 +2295,34 @@ impl App {
     /// Chat with the controller — layout follows UltraViewer chat (peer, history,
     /// input), docked on the RIGHT, with a square collapse button outside the left
     /// of the title bar. Opens itself when a message arrives.
+    /// Session window shape: follow the peer's screen aspect ratio so the picture
+    /// fills the window without black bars (the status strip height is included).
+    fn ses_design(&self, ctx: &egui::Context) -> egui::Vec2 {
+        // Follow the selected monitor when one is chosen; otherwise the whole canvas.
+        let (w, h) = match self.mon_ix.and_then(|i| self.monitors.get(i)) {
+            Some(m) => (m.w as f32, m.h as f32),
+            None => (self.size[0] as f32, self.size[1] as f32),
+        };
+        if w < 2.0 || h < 2.0 {
+            return egui::vec2(SESS_SIZE[0], SESS_SIZE[1]);
+        }
+        let mon = ctx
+            .input(|i| i.viewport().monitor_size)
+            .unwrap_or(egui::vec2(1920.0, 1080.0));
+        let max_w = (mon.x * 0.92).max(320.0);
+        let max_h = (mon.y * 0.92 - BAR_H).max(200.0);
+        let scale = (max_w / w).min(max_h / h);
+        egui::vec2(w * scale, h * scale + BAR_H)
+    }
+
     fn chat_panel(&mut self, ctx: &egui::Context) {
         use chat_color as m;
         crate::hostmode::set_ctx(ctx);
+        // Every time the chat opens, put it back at the bottom-right corner.
+        if self.chat_open && !self.chat_last_open {
+            self.chat_pos = None;
+        }
+        self.chat_last_open = self.chat_open;
         // Controlling another machine (UltraViewer session) -> that session's chat; otherwise the
         // host-mode chat. Only the latter used to exist, so when Linux controlled
         // Windows the chat showed nobody / disconnected and could not send (22:58).
@@ -2268,6 +2399,7 @@ impl App {
 
         let mut out_msg: Option<String> = None;
         let mut close_chat = false;
+        let mut hang_up = false;
         let mut edited = false;
         let mut toggle_dock = false;
         let mut picked: Option<crate::attach::Pick> = None;
@@ -2436,10 +2568,6 @@ impl App {
                                     .desired_width(ui.available_width() - height - 6.0 - 16.0),
                             );
                             edited = o.changed();
-                            if o.has_focus() && !use_ime {
-                                // Turn the Linux IME off for the chat box (see `linux_ime`).
-                                ctx.output_mut(|out| out.ime = None);
-                            }
                             let enter = o.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                             let has_text = !input.trim().is_empty();
                             let on = in_sess && has_text;
@@ -2484,11 +2612,23 @@ impl App {
                                 let card_name = if in_sess || !name.is_empty() { show_name.as_str() } else { "Chưa có ai" };
                                 ui.label(RichText::new(card_name).size(13.0).color(TEXT));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(
-                                        RichText::new(if in_sess { "Đang kết nối" } else { "Đã ngắt" })
-                                            .size(11.0)
-                                            .color(if in_sess { m::OK_GREEN } else { m::MUTED }),
-                                    );
+                                    // UltraViewer: × at the right of the machine row ends the session.
+                                    // The × in the title bar only hides this chat frame.
+                                    if in_sess {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(RichText::new("×").size(16.0).color(m::MUTED))
+                                                    .frame(false)
+                                                    .min_size(egui::vec2(22.0, 22.0)),
+                                            )
+                                            .on_hover_text("Ngắt kết nối")
+                                            .clicked()
+                                        {
+                                            hang_up = true;
+                                        }
+                                    } else {
+                                        ui.label(RichText::new("Đã ngắt").size(11.0).color(m::MUTED));
+                                    }
                                 });
                             });
                         });
@@ -2770,6 +2910,15 @@ impl App {
                 self.typing_out = false;
             }
         }
+        if hang_up {
+            if as_ctrl {
+                self.disconnect(ctx);
+            } else {
+                crate::hostmode::request_end_session(&self.host);
+                self.status = "Đã ngắt kết nối".into();
+                self.tone = Tone::Warn;
+            }
+        }
     }
 }
 
@@ -2809,20 +2958,97 @@ impl App {
                             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(item));
                             ui.close_menu();
                         }
+                        ui.separator();
+                        ui.label(RichText::new("Quyền hệ thống").size(12.0).color(TEXT));
+                        if ui.button("Cấp lại quyền").clicked() {
+                            ui.close_menu();
+                            let (screen, input, detail) = crate::hostmode::grant_system_access();
+                            if screen && input {
+                                self.host.lock().unwrap().alert = None;
+                            } else {
+                                self.host.lock().unwrap().alert = Some(detail.clone());
+                            }
+                            self.status = detail;
+                            self.tone = if screen && input { Tone::Ok } else { Tone::Warn };
+                        }
                     });
                     ui.menu_button(RichText::new("Trợ giúp").size(12.5), |ui| {
                         if ui.button("Giới thiệu").clicked() {
                             ui.close_menu();
-                            self.status = format!(
-                                "X-Remote {} — client UltraViewer cho Linux/macOS",
-                                env!("CARGO_PKG_VERSION")
-                            );
-                            self.tone = Tone::Ok;
+                            self.about_open = true;
                         }
                     });
                 });
               });
             });
+    }
+
+    /// Version and product info. Own OS window, so it is not drawn inside the ID form.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let id = egui::ViewportId::from_hash_of("x-remote-about");
+        if !self.about_open {
+            if self.about_made {
+                if cfg!(target_os = "macos") {
+                    ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(false));
+                } else {
+                    ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Close);
+                    self.about_made = false;
+                }
+            }
+            return;
+        }
+        self.about_made = true;
+        let mut close = false;
+        let b = egui::ViewportBuilder::default()
+            .with_title("Giới thiệu X-Remote")
+            .with_inner_size([440.0, 280.0])
+            .with_min_inner_size([440.0, 280.0])
+            .with_max_inner_size([440.0, 280.0])
+            .with_resizable(false)
+            .with_decorations(true);
+        ctx.show_viewport_immediate(id, b, |ctx, _| {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                close = true;
+            }
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(Color32::WHITE)
+                        .inner_margin(egui::Margin::same(16)),
+                )
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("X-Remote").size(18.0).strong().color(UV_INK));
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Điều khiển máy tính từ xa, tương thích UltraViewer")
+                            .size(12.5)
+                            .color(UV_HINT),
+                    );
+                    ui.add_space(12.0);
+                    egui::Grid::new("gioi-thieu")
+                        .num_columns(2)
+                        .spacing([18.0, 10.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            let row = |ui: &mut egui::Ui, k: &str, v: &str| {
+                                ui.label(RichText::new(k).size(13.0).strong().color(UV_LBL));
+                                ui.label(RichText::new(v).size(13.0).color(UV_INK));
+                                ui.end_row();
+                            };
+                            row(ui, "Ứng dụng", "X-Remote");
+                            row(ui, "Phiên bản", env!("CARGO_PKG_VERSION"));
+                            row(ui, "Hệ điều hành", os_label());
+                            row(ui, "Giao thức", uvsession::VERSION);
+                        });
+                    ui.add_space(16.0);
+                    if ui.button("Đóng").clicked() {
+                        close = true;
+                    }
+                });
+        });
+        if close {
+            self.about_open = false;
+        }
     }
 
     fn connect_view(&mut self, ctx: &egui::Context) {
@@ -3058,7 +3284,8 @@ impl App {
                     .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 8, se: 8 })
                     .inner_margin(egui::Margin { left: 6, right: 6, top: 4, bottom: 4 })
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.set_max_width((ui.ctx().screen_rect().width() - 20.0).max(220.0));
+                        ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             // Menu button: icon on the left, label, dropdown arrow on the right (28 px pad both sides).
                             let menu_btn = |ui: &mut egui::Ui,
@@ -3728,7 +3955,7 @@ mod tests {
 
     #[test]
     fn saved_id_shows_immediately() {
-        assert_eq!(host_id_label(Some("136674901"), true), "136 674 901");
+        assert_eq!(host_id_label(Some("100000001"), true), "100 000 001");
         assert_eq!(host_id_label(Some("  "), true), "— đang đăng ký —");
         assert_eq!(host_id_label(None, true), "— đang đăng ký —");
         assert_eq!(host_id_label(None, false), "— chưa hỗ trợ —");

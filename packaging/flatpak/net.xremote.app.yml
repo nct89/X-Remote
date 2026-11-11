@@ -1,0 +1,49 @@
+# Flatpak manifest for X-Remote.
+# Local build: sh scripts/build-flatpak.sh   (packs the source + vendored crates first)
+app-id: net.xremote.app
+runtime: org.gnome.Platform
+# GNOME runtime (not plain freedesktop): it ships python3, PyGObject and WebKitGTK 6.0,
+# which the captcha helper (scripts/captcha_linux.py) needs when registering an ID.
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: x-remote
+finish-args:
+  - --share=network
+  # MIT-SHM screen capture in "be controlled" mode.
+  - --share=ipc
+  # X11 only (XWayland on a Wayland desktop): the chat panel needs window positions,
+  # and native Wayland can hang the UI (see prefer_x11 in crates/client/src/main.rs).
+  - --socket=x11
+  - --device=dri
+  # Saved screenshots: ~/Pictures/X-Remote.
+  - --filesystem=xdg-pictures/X-Remote:create
+  # Optional fcitx5 hookup for Vietnamese input (bind_ime_x11).
+  - --talk-name=org.fcitx.Fcitx5
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/x-remote/cargo
+    CARGO_NET_OFFLINE: 'true'
+modules:
+  - name: x-remote
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked -p uvclient
+      - install -Dm755 target/release/uvclient /app/bin/x-remote
+      - install -Dm644 packaging/x-remote.desktop /app/share/applications/net.xremote.app.desktop
+      - desktop-file-edit --set-icon=net.xremote.app /app/share/applications/net.xremote.app.desktop
+      - install -Dm644 packaging/net.xremote.app.metainfo.xml /app/share/metainfo/net.xremote.app.metainfo.xml
+      - sed -i 's|<launchable type="desktop-id">x-remote.desktop</launchable>|<launchable type="desktop-id">net.xremote.app.desktop</launchable>|' /app/share/metainfo/net.xremote.app.metainfo.xml
+      - install -Dm644 packaging/icon-32.png /app/share/icons/hicolor/32x32/apps/net.xremote.app.png
+      - install -Dm644 packaging/icon-48.png /app/share/icons/hicolor/48x48/apps/net.xremote.app.png
+      - install -Dm644 packaging/icon-64.png /app/share/icons/hicolor/64x64/apps/net.xremote.app.png
+      - install -Dm644 packaging/x-remote.png /app/share/icons/hicolor/128x128/apps/net.xremote.app.png
+      - install -Dm644 packaging/icon.png /app/share/icons/hicolor/256x256/apps/net.xremote.app.png
+      # Third-party screen dictionary only when the packer opted in (BUNDLE_DICT=1).
+      - if [ -f packaging/8bit.dat.bundle ]; then install -Dm644 packaging/8bit.dat.bundle /app/share/x-remote/8bit.dat; fi
+    sources:
+      # Made by scripts/build-flatpak.sh: working tree (no target/, dist/) + `cargo vendor`.
+      - type: archive
+        path: build/x-remote-src.tar.gz

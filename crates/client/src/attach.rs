@@ -175,6 +175,10 @@ fn zip_name(p: &Path) -> String {
 /// System file dialog. Linux: `zenity` (GNOME/XFCE), fall back to `kdialog`.
 fn pick_dialog(kind: Pick) -> Result<Vec<PathBuf>, String> {
     #[cfg(target_os = "linux")]
+    if in_flatpak() {
+        return Ok(portal_pick(kind));
+    }
+    #[cfg(target_os = "linux")]
     {
         let mut cmd = std::process::Command::new("zenity");
         // zenity 4 (GTK4) opens the picker through xdg-desktop-portal by default. The portal
@@ -319,5 +323,27 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(1536), "1,5 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5,0 MB");
+    }
+}
+
+/// Running inside a Flatpak sandbox (no zenity/kdialog there; use the portal).
+#[cfg(target_os = "linux")]
+pub fn in_flatpak() -> bool {
+    std::env::var_os("FLATPAK_ID").is_some() || Path::new("/.flatpak-info").exists()
+}
+
+/// xdg-desktop-portal FileChooser. Selected files come back as document-portal
+/// paths the sandbox can read. Cancel -> empty list.
+#[cfg(target_os = "linux")]
+fn portal_pick(kind: Pick) -> Vec<PathBuf> {
+    let dlg = rfd::FileDialog::new();
+    match kind {
+        Pick::Dir => dlg.set_title("Chọn thư mục (chèn liên kết vào tin)").pick_folder().into_iter().collect(),
+        Pick::Image => dlg
+            .set_title("Chọn hình ảnh để gửi")
+            .add_filter("Hình ảnh", IMG_EXT)
+            .pick_files()
+            .unwrap_or_default(),
+        Pick::File => dlg.set_title("Chọn tệp để gửi").pick_files().unwrap_or_default(),
     }
 }

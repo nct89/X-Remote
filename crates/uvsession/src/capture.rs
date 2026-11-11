@@ -32,9 +32,12 @@ pub struct Capturer {
 unsafe impl Send for Capturer {}
 
 impl Capturer {
-    /// Connect to the X server (`$DISPLAY`) and read the root screen size.
+    /// Connect to the X server (`$DISPLAY`, falling back to `:0` / `:1`) and read the root screen size.
     pub fn new() -> Result<Capturer, String> {
-        let (conn, screen_num) = x11rb::connect(None).map_err(|e| format!("X11 connect failed: {e}"))?;
+        let (conn, screen_num) = x11rb::connect(None)
+            .or_else(|_| x11rb::connect(Some(":0")))
+            .or_else(|_| x11rb::connect(Some(":1")))
+            .map_err(|e| format!("X11 connect failed: {e}"))?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
         let width = screen.width_in_pixels;

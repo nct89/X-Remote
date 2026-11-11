@@ -18,3 +18,5 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["shape"] }
+# File picker through xdg-desktop-portal (used inside Flatpak, where zenity/kdialog do not exist).
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }

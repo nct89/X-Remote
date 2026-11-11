@@ -132,6 +132,7 @@ fn run(
     let mut h = 1080usize;
     // Buffer shared with the UI; copy only while the UI still holds the old one.
     let mut canvas: std::sync::Arc<Vec<u8>> = std::sync::Arc::new(vec![0u8; w * h * 3]);
+    let mut rstate = RState::new();
     let mut nbytes = 0usize;
     let mut sent_at: Option<Instant> = None;
     let debug = std::env::var("UV_DEBUG_INPUT").is_ok();
@@ -189,7 +190,7 @@ fn run(
                 continue;
             }
             // Monitor layout rides in a small text message; only the first one matters.
-            if !da_co_bo_cuc && msg.len() < uvsession::layout::MAX_LAYOUT_MSG {
+            if msg.len() < uvsession::layout::MAX_LAYOUT_MSG {
                 let mons = uvsession::parse_monitors(&msg);
                 if !mons.is_empty() {
                     da_co_bo_cuc = true;
@@ -271,17 +272,7 @@ fn run(
                             h = nh;
                         }
                         let dst = std::sync::Arc::make_mut(&mut canvas);
-                        paint_frame(dst.as_mut_slice(), w, h, &f.rects, &f.pixels);
-                        // Aux regions arrive as much sharper JPEG than RGB555;
-                        // blit them on top after the raw pixels.
-                        let n_tile = blit_jpeg_atlas(dst.as_mut_slice(), w, h, &f.jpeg, &f.aux);
-                        if n_tile > 0 && std::env::var("UV_DEBUG_INPUT").is_ok() {
-                            eprintln!(
-                                "[uv] blitted {} JPEG tiles for {} aux regions",
-                                n_tile,
-                                f.aux.len()
-                            );
-                        }
+                        render_frame(dst.as_mut_slice(), w, h, &mut rstate, &f);
                         have_pic = true;
                     }
                 }
@@ -328,6 +319,7 @@ fn grow(prev: &[u8], w: usize, h: usize, nw: usize, nh: usize) -> Vec<u8> {
 }
 
 /// Paint RGB555 rects onto the UI's RGB image (leave the rest untouched).
+#[cfg(test)]
 fn paint_frame(dst: &mut [u8], w: usize, h: usize, rects: &[uvsession::Region], pixels: &[u8]) {
     let mut off = 0usize;
     for r in rects {
@@ -462,55 +454,244 @@ fn blit_jpeg_atlas(
     if aw == 0 || ah < T {
         return 0;
     }
-    let tong_tile = ah / T;
-    let mut idx = 0usize;
+    // Column-major tile walk + bottom-up rows, matching the verified MacViewer
+    // reference. The atlas is a strip of 32x32 tiles, wrapped into the next column
+    // when one column fills; its rows are addressed bottom-up.
+    let mut column = 0usize;
+    let mut sy = 0usize;
     let mut da_dan = 0usize;
     for r in aux {
         if r.w <= 0 || r.h <= 0 {
             continue;
         }
         let (rw, rh) = (r.w as usize, r.h as usize);
-        let cols = (rw + T - 1) / T;
-        let rows = (rh + T - 1) / T;
-        for ry in 0..rows {
-            for cx in 0..cols {
-                if idx >= tong_tile {
+        for dx in (0..rw).step_by(T) {
+            for dy in (0..rh).step_by(T) {
+                let (tw, th) = (T.min(rw - dx), T.min(rh - dy));
+                if sy + th > ah {
+                    sy = 0;
+                    column += 1;
+                }
+                let sx = column * T;
+                if sx + tw > aw || sy + th > ah {
                     return da_dan;
                 }
-                let tw = T.min(rw - cx * T);
-                let th = T.min(rh - ry * T);
-                let goc_x = r.x + (cx * T) as i32;
-                let goc_y = r.y + (ry * T) as i32;
-                for y in 0..th {
-                    let dy = goc_y + y as i32;
-                    if dy < 0 || dy >= h as i32 {
+                let gx = r.x + dx as i32;
+                let gy = r.y + dy as i32;
+                for row in 0..th {
+                    let yy = gy + row as i32;
+                    if yy < 0 || yy >= h as i32 {
                         continue;
                     }
-                    for x in 0..tw {
-                        let dx = goc_x + x as i32;
-                        if dx < 0 || dx >= w as i32 {
+                    let src_row = ah - 1 - (sy + row);
+                    let so = (src_row * aw + sx) * 3;
+                    for col in 0..tw {
+                        let xx = gx + col as i32;
+                        if xx < 0 || xx >= w as i32 {
                             continue;
                         }
-                        let sy = idx * T + y;
-                        if x >= aw || sy >= ah {
-                            continue;
-                        }
-                        let si = (sy * aw + x) * 3;
-                        if si + 2 >= anh.len() {
-                            continue;
-                        }
-                        let di = (dy as usize * w + dx as usize) * 3;
+                        let di = (yy as usize * w + xx as usize) * 3;
+                        let si = so + col * 3;
                         dst[di] = anh[si];
                         dst[di + 1] = anh[si + 1];
                         dst[di + 2] = anh[si + 2];
                     }
                 }
-                idx += 1;
+                sy += th;
                 da_dan += 1;
             }
         }
     }
     da_dan
+}
+
+// ---------------------------------------------------------------------------
+// Delta-frame renderer: cache + scroll + copy. Ported from the verified
+// MacViewer reference (DeanOpen/MacViewer, screen/renderer.rs), adapted to a
+// top-down RGB (3-byte) canvas instead of a bottom-up RGB555 DIB.
+// ---------------------------------------------------------------------------
+
+struct CachedTile {
+    w: usize,
+    h: usize,
+    px: Vec<u8>, // tightly packed top-down RGB
+}
+
+struct RState {
+    w: usize,
+    h: usize,
+    temp: Vec<u8>, // top-down RGB w*h*3
+    cache: std::collections::HashMap<i32, CachedTile>,
+    cache_order: Vec<i32>, // oldest first
+}
+
+impl RState {
+    fn new() -> Self {
+        RState {
+            w: 0,
+            h: 0,
+            temp: Vec::new(),
+            cache: std::collections::HashMap::new(),
+            cache_order: Vec::new(),
+        }
+    }
+
+    fn set_size(&mut self, w: usize, h: usize) {
+        if self.w != w || self.h != h {
+            self.w = w;
+            self.h = h;
+            self.temp = vec![0u8; w * h * 3];
+            self.cache.clear();
+            self.cache_order.clear();
+        }
+    }
+}
+
+fn blit_rect(
+    dst: &mut [u8],
+    src: &[u8],
+    w: usize,
+    h: usize,
+    sx: i32,
+    sy: i32,
+    dx: i32,
+    dy: i32,
+    cw: i32,
+    ch: i32,
+) {
+    let (wi, hi) = (w as i64, h as i64);
+    let left = 0i64.max(-(sx as i64)).max(-(dx as i64));
+    let top = 0i64.max(-(sy as i64)).max(-(dy as i64));
+    let right = (cw as i64).min(wi - sx as i64).min(wi - dx as i64);
+    let bottom = (ch as i64).min(hi - sy as i64).min(hi - dy as i64);
+    if left >= right || top >= bottom {
+        return;
+    }
+    let n = (right - left) as usize * 3;
+    for row in 0..(bottom - top) as usize {
+        let so = (((sy as i64 + top + row as i64) as usize) * w + (sx as i64 + left) as usize) * 3;
+        let d = (((dy as i64 + top + row as i64) as usize) * w + (dx as i64 + left) as usize) * 3;
+        dst[d..d + n].copy_from_slice(&src[so..so + n]);
+    }
+}
+
+fn blit_tile(dst: &mut [u8], w: usize, h: usize, px: &[u8], tw: usize, th: usize, dx: i32, dy: i32) {
+    let sx0 = if dx < 0 { (-dx) as usize } else { 0 };
+    let sy0 = if dy < 0 { (-dy) as usize } else { 0 };
+    let dx0 = dx.max(0) as usize;
+    let dy0 = dy.max(0) as usize;
+    let cw = tw.saturating_sub(sx0).min(w.saturating_sub(dx0));
+    let ch = th.saturating_sub(sy0).min(h.saturating_sub(dy0));
+    for row in 0..ch {
+        let so = ((sy0 + row) * tw + sx0) * 3;
+        let d = ((dy0 + row) * w + dx0) * 3;
+        dst[d..d + cw * 3].copy_from_slice(&px[so..so + cw * 3]);
+    }
+}
+
+fn blit_rgb555(dst: &mut [u8], w: usize, h: usize, r: &uvsession::Region, pixels: &[u8], off: &mut usize) {
+    if r.w <= 0 || r.h <= 0 {
+        return;
+    }
+    let need = r.w as usize * r.h as usize * 2;
+    if *off + need > pixels.len() {
+        return;
+    }
+    for row in 0..r.h as usize {
+        let y = r.y + row as i32;
+        if y < 0 || y >= h as i32 {
+            continue;
+        }
+        let mut i = *off + row * r.w as usize * 2;
+        for col in 0..r.w as usize {
+            let x = r.x + col as i32;
+            if x >= 0 && x < w as i32 {
+                let v = u16::from_le_bytes([pixels[i], pixels[i + 1]]);
+                let p = uvsession::frame::rgb555_pixel(v);
+                let d = (y as usize * w + x as usize) * 3;
+                dst[d] = p[0];
+                dst[d + 1] = p[1];
+                dst[d + 2] = p[2];
+            }
+            i += 2;
+        }
+    }
+    *off += need;
+}
+
+fn extract_rgb(src: &[u8], w: usize, h: usize, r: &uvsession::Region) -> Vec<u8> {
+    let rw = r.w.max(0) as usize;
+    let rh = r.h.max(0) as usize;
+    let mut out = vec![0u8; rw * rh * 3];
+    for row in 0..rh {
+        let y = r.y + row as i32;
+        if y < 0 || y >= h as i32 {
+            continue;
+        }
+        for col in 0..rw {
+            let x = r.x + col as i32;
+            if x < 0 || x >= w as i32 {
+                continue;
+            }
+            let so = (y as usize * w + x as usize) * 3;
+            let d = (row * rw + col) * 3;
+            out[d..d + 3].copy_from_slice(&src[so..so + 3]);
+        }
+    }
+    out
+}
+
+fn render_frame(main: &mut [u8], w: usize, h: usize, st: &mut RState, f: &uvsession::frame::Frame) {
+    st.set_size(w, h);
+
+    if let Some(sc) = &f.scroll {
+        blit_rect(
+            &mut st.temp,
+            main,
+            w,
+            h,
+            sc.capture.x,
+            sc.capture.y,
+            sc.capture.x,
+            sc.capture.y - sc.delta,
+            sc.capture.w,
+            sc.capture.h,
+        );
+        for r in &sc.copy_back {
+            blit_rect(main, &st.temp, w, h, r.x, r.y, r.x, r.y, r.w, r.h);
+        }
+    }
+
+    for r in &f.cache_refs {
+        if let Some(t) = st.cache.get(&r.hash) {
+            blit_tile(&mut st.temp, w, h, &t.px, t.w, t.h, r.x, r.y);
+        }
+    }
+
+    for r in &f.copy {
+        blit_rect(main, &st.temp, w, h, r.x, r.y, r.x, r.y, r.w, r.h);
+    }
+
+    blit_jpeg_atlas(main, w, h, &f.jpeg, &f.aux);
+
+    let mut off = 0usize;
+    for r in &f.rects {
+        blit_rgb555(main, w, h, r, &f.pixels, &mut off);
+    }
+
+    for a in &f.cache_adds {
+        blit_rect(&mut st.temp, main, w, h, a.r.x, a.r.y, a.r.x, a.r.y, a.r.w, a.r.h);
+        let px = extract_rgb(&st.temp, w, h, &a.r);
+        st.cache.insert(a.hash, CachedTile { w: a.r.w as usize, h: a.r.h as usize, px });
+        st.cache_order.retain(|&x| x != a.hash);
+        st.cache_order.push(a.hash);
+    }
+    while st.cache_order.len() > 1000 {
+        if let Some(h0) = st.cache_order.first().copied() {
+            st.cache.remove(&h0);
+        }
+        st.cache_order.remove(0);
+    }
 }
 
 #[cfg(test)]
@@ -554,14 +735,14 @@ mod tests {
         assert_eq!(&dst[3..6], &[0, 0, 0]);
     }
 
-    /// 32×64 atlas of two tiles: tile 0 red, tile 1 blue.
+    /// 32×64 bottom-up atlas of two tiles: tile 0 red (rows 32..64), tile 1 blue (rows 0..32).
     fn two_tile_atlas() -> Vec<u8> {
         let (aw, ah) = (32usize, 64usize);
         let mut rgb = vec![0u8; aw * ah * 3];
         for y in 0..ah {
             for x in 0..aw {
                 let i = (y * aw + x) * 3;
-                if y < 32 {
+                if y >= 32 {
                     rgb[i] = 255;
                 } else {
                     rgb[i + 2] = 255;

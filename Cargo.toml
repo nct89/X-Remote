@@ -6,9 +6,9 @@ members = ["crates/proto", "crates/agent", "crates/client", "crates/engine", "cr
 default-members = ["crates/proto", "crates/client", "crates/engine", "crates/mock", "crates/uvsession"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 
 [profile.release]
 opt-level = 3

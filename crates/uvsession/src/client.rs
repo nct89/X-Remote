@@ -10,7 +10,7 @@ use std::time::Duration;
 use md5::{Digest, Md5};
 use rand::Rng;
 
-use crate::control::{build_login, build_tra, Control, VERSION};
+use crate::control::{build_login, build_login_profile, build_tra, Control, FALLBACK_PROFILES, VERSION};
 use crate::session::Session;
 
 use crate::Ident;
@@ -120,28 +120,65 @@ pub fn connect(
     let http_n = ctl.http_post().unwrap_or(0);
     log(&format!("TLS + HTTP done ({http_n} bytes)"));
 
-    ctl.send(&build_login(&id, lport, &lan, own_id, own_pw, "vi"))
+    let mut eff_own_id = own_id.to_string();
+    let initial_frame = if let Some(p) = FALLBACK_PROFILES
+        .iter()
+        .find(|p| p.disk_id == id.disk_id || p.prefer_id == own_id)
+    {
+        eff_own_id = p.prefer_id.to_string();
+        build_login_profile(&id, &lport.to_string(), &lan, "vi", p, 9600)
+    } else {
+        build_login(&id, lport, &lan, own_id, own_pw, "vi")
+    };
+    ctl.send(&initial_frame)
         .map_err(|e| format!("login send failed: {e}"))?;
-    // The server immediately returns a "60:<token>" challenge, not necessarily
-    // "3:<...>". The original also skips this and sends the ID lookup, so here
-    // we only discard one message if one is waiting — a short wait, so it costs little.
     ctl.set_timeout(Duration::from_secs(3)).ok();
-    let _challenge = ctl.recv().ok().flatten();
-    log(&format!(
-        "login sent, challenge: {}",
-        _challenge.as_ref().map(|m| String::from_utf8_lossy(m).to_string()).unwrap_or_else(|| "none".into())
-    ));
+    let mut challenge = ctl.recv().ok().flatten();
+    if challenge.as_ref().and_then(|m| m.get(1)) == Some(&b'6') {
+        for p in &FALLBACK_PROFILES {
+            if let Ok(mut c2) = Control::connect(Duration::from_secs(10)) {
+                if c2.http_post().is_ok()
+                    && c2
+                        .send(&build_login_profile(&id, &lport.to_string(), &lan, "vi", p, 9600))
+                        .is_ok()
+                {
+                    c2.set_timeout(Duration::from_secs(3)).ok();
+                    let r = c2.recv().ok().flatten();
+                    if r.as_ref().and_then(|m| m.get(1)) == Some(&b'3') {
+                        eff_own_id = p.prefer_id.to_string();
+                        ctl = c2;
+                        challenge = r;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let challenge_txt = challenge
+        .as_ref()
+        .map(|m| String::from_utf8_lossy(m).to_string())
+        .unwrap_or_else(|| "none".into());
+    log(&format!("login sent, challenge: {challenge_txt}"));
     ctl.set_timeout(Duration::from_secs(15)).ok();
 
     ctl.send(&build_tra(
-        partner_id, partner_pw, own_id, own_pw, 0, &pub_ip, lport, &lan, lport, &session_pw,
+        partner_id,
+        partner_pw,
+        &eff_own_id,
+        own_pw,
+        0,
+        &pub_ip,
+        lport,
+        &lan,
+        lport,
+        &session_pw,
     ))
     .map_err(|e| format!("ID lookup send failed: {e}"))?;
     let resp = ctl_wait(&mut ctl, b'8', 4).ok_or("no ID lookup reply (control channel silent)")?;
     log(&format!("ID lookup reply: {}", String::from_utf8_lossy(&resp[..resp.len().min(160)])));
     let _ = &resp;
     let txt = String::from_utf8_lossy(&resp[1..]).to_string();
-    if !txt.starts_with("8:1") {
+    if !txt.starts_with("8:1:") {
         let code = txt.split(':').nth(1).unwrap_or("?");
         return Err(format!("ID lookup failed ({code}: {}): {}", status_text(code), &txt[..txt.len().min(120)]));
     }
@@ -178,7 +215,7 @@ pub fn connect(
 
     // Open the session: flag 1 (binary) + the login string as UTF-16LE.
     let sid: u64 = rand::thread_rng().gen_range(10_000_000..99_999_999);
-    let login = session_login(&sid.to_string(), partner_pw, own_id, &id.host_name);
+    let login = session_login(&sid.to_string(), partner_pw, &eff_own_id, &id.host_name);
     let mut payload = vec![1u8];
     for u in login.encode_utf16() {
         payload.extend_from_slice(&u.to_le_bytes());
@@ -191,6 +228,10 @@ pub fn connect(
     // The original generates a positive 31-bit number; the peer reads it as i32, so it must not overflow.
     let rid: i32 = rand::thread_rng().gen_range(0..i32::MAX);
     session.send(format!("\x004|||{rid}").as_bytes()).map_err(|e| e.to_string())?;
+    // Ask for sharp RGB555 frames up front: the peer's default is more compressed and
+    // looks blurry / blocky during motion. 70 = prioritize sharpness, 2 = RGB555.
+    session.send(b"\x0031|||70").map_err(|e| e.to_string())?;
+    session.send(b"\x0032|||2").map_err(|e| e.to_string())?;
     session.set_timeout(Duration::from_secs(20)).map_err(|e| e.to_string())?;
 
     Ok(Connected { session, control: ctl, session_pw, peer })

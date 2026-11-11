@@ -35,6 +35,7 @@ pub mod chat;
 pub mod client;
 pub mod control;
 pub mod crypto;
+pub mod diag;
 pub mod ident;
 pub mod frame;
 pub mod host;

@@ -101,6 +101,7 @@ pub fn serve_session_chat(
     // UI stays on "Connecting".
     hs.session.set_write_timeout(Duration::from_secs(2)).ok();
     let mut n = 0i32;
+    let mut jpeg_q: u8 = 70;
 
     // Command 0 (init) — the real controller waits for this to build the canvas.
     let host_name = crate::Ident::current().host_name;
@@ -120,6 +121,8 @@ pub fn serve_session_chat(
 
     loop {
         if halt() {
+            // Tell the controller this side hung up, the same word it sends (`19`).
+            let _ = hs.session.send(crate::client::BREAK_ERR);
             return Ok(());
         }
         while let Some(out) = chat.poll_out() {
@@ -148,6 +151,13 @@ pub fn serve_session_chat(
                     Some(0) | Some(1) => &msg[1..],
                     _ => &msg[..],
                 };
+                if let Some(q) = body.strip_prefix(b"31|||") {
+                    if let Ok(v) = std::str::from_utf8(q).unwrap_or("").trim().parse::<i32>() {
+                        jpeg_q = v.clamp(10, 95) as u8;
+                        eprintln!("[uv-host] quality {jpeg_q}");
+                    }
+                    continue;
+                }
                 match classify(body) {
                     SessCmd::Stop => {
                         eprintln!("[uv-host] controller stopped (19)");
@@ -170,7 +180,7 @@ pub fn serve_session_chat(
                         // Idle refresh only adds rows every IDLE_STRIDE frames.
                         let do_scan = rows != IDLE_ROWS || n18 % IDLE_STRIDE == 0;
                         let q = if do_scan { &mut scan } else { &mut no_scan };
-                        send_frame(hs, cap, &mut prev, q, rows, &mut n, &mut stats)?;
+                        send_frame(hs, cap, &mut prev, q, rows, &mut n, &mut stats, jpeg_q)?;
                         if scan.is_none() {
                             // End of a pass: more fast passes rescan (repair tiles the
                             // controller dropped — a black band at the top), then a
@@ -217,7 +227,7 @@ pub fn serve_session_chat(
                 if n18 == 0 && !sent_first && started.elapsed() >= FIRST_FRAME_WAIT {
                     eprintln!("[uv-host] no 18 yet — sending first frame (not counted as baseline)");
                     sent_first = true;
-                    send_frame(hs, cap, &mut prev, &mut scan, rows, &mut n, &mut stats)?;
+                    send_frame(hs, cap, &mut prev, &mut scan, rows, &mut n, &mut stats, jpeg_q)?;
                     on_frame(n);
                     // `need_full` stays set: the first `18` still gets a full frame.
                 }
@@ -240,6 +250,7 @@ fn send_frame(
     rows: usize,
     n: &mut i32,
     stats: &mut FrameStats,
+    jpeg_q: u8,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let rgb = cap.grab_rgb()?;
@@ -250,7 +261,7 @@ fn send_frame(
     let t2 = Instant::now();
     let rects = frame::merge_rows(&tiles);
     let rgb555 = frame::pack_regions_rgb555(&rgb, w, &rects);
-    let (jpeg, aux) = frame::jpeg_tiles_for(&rgb, w, h, &tiles, 70).unwrap_or_default();
+    let (jpeg, aux) = frame::jpeg_tiles_for(&rgb, w, h, &tiles, jpeg_q).unwrap_or_default();
     let msg = frame::frame_message_ext(&rects, &rgb555, *n, &jpeg, &aux, frame::screen_dict())
         .ok_or("frame encode failed")?;
     let t3 = Instant::now();

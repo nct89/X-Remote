@@ -77,21 +77,94 @@ fn join_disk(model: &str, serial: &str, fw: &str) -> Option<String> {
     Some(format!("{}|{}|{}", if m.is_empty() { "DISK" } else { &m }, s, if fw.is_empty() { "1.0" } else { &fw }))
 }
 
+/// Base block device name (e.g. `sda` from `/dev/sda3`, `nvme0n1` from `/dev/nvme0n1p2`).
+#[cfg(target_os = "linux")]
+fn base_block_dev(dev: &str) -> String {
+    let name = dev.rsplit('/').next().unwrap_or(dev);
+    if (name.starts_with("nvme") || name.starts_with("mmcblk") || name.starts_with("loop"))
+        && name.contains('p')
+    {
+        if let Some((base, part)) = name.rsplit_once('p') {
+            if !base.is_empty() && !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
+                return base.to_string();
+            }
+        }
+    }
+    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if trimmed.is_empty() {
+        name.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Block device backing `/` in `/proc/mounts` (e.g. `sda` or `nvme0n1`).
+#[cfg(target_os = "linux")]
+fn root_block_dev() -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    for line in mounts.lines() {
+        let mut it = line.split_whitespace();
+        let dev = it.next()?;
+        let mnt = it.next()?;
+        if mnt == "/" && dev.starts_with("/dev/") {
+            return Some(base_block_dev(dev));
+        }
+    }
+    None
+}
+
 /// Read the real boot-disk id for this OS (best-effort; no root required).
 fn real_disk() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         // `/dev/disk/by-id/` holds links like `ata-VBOX_HARDDISK_VB97e2c89a-...`
-        // and `nvme-<model>_<serial>`. Model and serial are already in the name;
-        // readable without root.
+        // and `nvme-<model>_<serial>`. Prefer the disk backing `/` and internal
+        // non-USB drives so plugging in an external USB disk never shifts the ID.
         if let Ok(rd) = std::fs::read_dir("/dev/disk/by-id") {
-            let mut names: Vec<String> = rd
-                .flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| !n.contains("-part") && (n.starts_with("ata-") || n.starts_with("nvme-") || n.starts_with("scsi-") || n.starts_with("usb-")))
+            let root_dev = root_block_dev();
+            let mut raw_entries: Vec<(String, String)> = Vec::new();
+            let mut usb_devs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for entry in rd.flatten() {
+                let Ok(name) = entry.file_name().into_string() else { continue };
+                if name.contains("-part") {
+                    continue;
+                }
+                if !(name.starts_with("ata-")
+                    || name.starts_with("nvme-")
+                    || name.starts_with("scsi-")
+                    || name.starts_with("usb-"))
+                {
+                    continue;
+                }
+                let target = std::fs::read_link(entry.path())
+                    .ok()
+                    .and_then(|p| p.file_name().and_then(|f| f.to_str()).map(str::to_string))
+                    .unwrap_or_default();
+                if name.starts_with("usb-") && !target.is_empty() {
+                    usb_devs.insert(target.clone());
+                }
+                raw_entries.push((name, target));
+            }
+            let mut ranked: Vec<(u8, String)> = raw_entries
+                .into_iter()
+                .map(|(name, target)| {
+                    let is_usb_name = name.starts_with("usb-");
+                    let is_usb_dev = !target.is_empty() && usb_devs.contains(&target);
+                    let is_root = root_dev.as_deref().is_some_and(|r| r == target);
+                    let prio = if is_root && !is_usb_name {
+                        0
+                    } else if !is_usb_name && !is_usb_dev {
+                        1
+                    } else if !is_usb_name {
+                        2
+                    } else {
+                        3
+                    };
+                    (prio, name)
+                })
                 .collect();
-            names.sort();
-            if let Some(n) = names.into_iter().next() {
+            ranked.sort();
+            if let Some((_, n)) = ranked.into_iter().next() {
                 // `ata-MODEL_SERIAL` → model|serial.
                 let rest = n.splitn(2, '-').nth(1).unwrap_or(&n);
                 let (model, serial) = rest.rsplit_once('_').unwrap_or((rest, ""));

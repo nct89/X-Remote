@@ -20,6 +20,29 @@ impl Region {
     }
 }
 
+/// Part 6: scroll — vertical delta + capture region + copy-back rects.
+#[derive(Debug, Clone)]
+pub struct Scroll {
+    pub delta: i32,
+    pub capture: Region,
+    pub copy_back: Vec<Region>,
+}
+
+/// Part 9: reuse a cached tile at (x, y) under `hash`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CacheRef {
+    pub x: i32,
+    pub y: i32,
+    pub hash: i32,
+}
+
+/// Part 10: store the tile `r` under `hash` for later reuse.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheAdd {
+    pub r: Region,
+    pub hash: i32,
+}
+
 /// One decoded video frame.
 #[derive(Debug, Default, Clone)]
 pub struct Frame {
@@ -30,6 +53,14 @@ pub struct Frame {
     /// 32×N JPEG atlas of the extra regions.
     pub jpeg: Vec<u8>,
     pub aux: Vec<Region>,
+    /// Part 5: rects to copy from the temporary buffer (signed).
+    pub copy: Vec<Region>,
+    /// Part 6: scroll delta + capture + copy-back (None when empty).
+    pub scroll: Option<Scroll>,
+    /// Part 9: cache references (reuse stored tiles).
+    pub cache_refs: Vec<CacheRef>,
+    /// Part 10: cache additions (store new tiles).
+    pub cache_adds: Vec<CacheAdd>,
 }
 
 /// Read 8-byte rects: `u16` for main regions, `i16` for extra regions.
@@ -48,18 +79,37 @@ pub fn regions(data: &[u8], signed: bool) -> Vec<Region> {
     out
 }
 
-/// Optional zstd dictionary for screen frames, loaded at runtime from the path in
-/// `XREMOTE_SCREEN_DICT`. Not bundled (that dictionary is third-party). Without it,
-/// frames use plain zstd (fine peer-to-peer; only needed to interop with other clients).
+/// Optional zstd dictionary (`8bit.dat`). Read from `XREMOTE_SCREEN_DICT`, then
+/// from the install locations. Needed to decode frames from real UltraViewer peers;
+/// X-Remote hosts use plain zstd.
 pub fn screen_dict() -> Option<&'static [u8]> {
     use std::sync::OnceLock;
-    static D: OnceLock<Option<Vec<u8>>> = OnceLock::new();
-    D.get_or_init(|| {
-        std::env::var_os("XREMOTE_SCREEN_DICT")
-            .and_then(|p| std::fs::read(p).ok())
-            .filter(|v| !v.is_empty())
-    })
-    .as_deref()
+    static D: OnceLock<Vec<u8>> = OnceLock::new();
+    let v = D.get_or_init(|| {
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(p) = std::env::var_os("XREMOTE_SCREEN_DICT") {
+            paths.push(p.into());
+        }
+        if let Some(h) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            paths.push(std::path::PathBuf::from(h).join(".local/share/x-remote/8bit.dat"));
+        }
+        paths.push(std::path::PathBuf::from("/usr/share/x-remote/8bit.dat"));
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                paths.push(dir.join("../share/x-remote/8bit.dat"));
+                paths.push(dir.join("8bit.dat"));
+            }
+        }
+        for p in paths {
+            if let Ok(v) = std::fs::read(&p) {
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        Vec::new()
+    });
+    if v.is_empty() { None } else { Some(v.as_slice()) }
 }
 
 /// zstd decompress, with dictionary when given; otherwise plain.
@@ -74,13 +124,12 @@ pub fn decompress(data: &[u8], dict: Option<&[u8]>) -> Option<Vec<u8>> {
 
 /// Decode the parts of one command-1 frame.
 pub fn parse(parts: &[Vec<u8>], dict: Option<&[u8]>) -> Option<Frame> {
-    if parts.len() < 3 || parts[0].first().copied() != Some(1) {
+    if parts[0].first().copied() != Some(1) {
         return None;
     }
+    // A delta frame may carry only cache/scroll/copy and have no raw pixels, so
+    // we must not reject empty rects/pixels here.
     let rects = regions(&parts[1], false);
-    if rects.is_empty() {
-        return None;
-    }
     let mut pixels = Vec::new();
     for body in [&parts[2][..], parts[2].get(4..).unwrap_or(&[])] {
         if body.is_empty() {
@@ -91,20 +140,57 @@ pub fn parse(parts: &[Vec<u8>], dict: Option<&[u8]>) -> Option<Frame> {
             break;
         }
     }
-    if pixels.is_empty() {
-        return None;
-    }
     let frame_no = parts
         .get(4)
         .filter(|p| p.len() == 4)
         .map(|p| i32::from_le_bytes([p[0], p[1], p[2], p[3]]))
         .unwrap_or(-1);
+    let copy = parts.get(5).map(|p| regions(p, true)).unwrap_or_default();
+    let scroll = parts
+        .get(6)
+        .filter(|p| !p.is_empty() && p.len() >= 10)
+        .map(|p| Scroll {
+            delta: i16::from_le_bytes([p[0], p[1]]) as i32,
+            capture: regions(&p[2..10], true)
+                .into_iter()
+                .next()
+                .unwrap_or(Region { x: 0, y: 0, w: 0, h: 0 }),
+            copy_back: regions(&p[10..], true),
+        });
+    let cache_refs = parts
+        .get(9)
+        .map(|p| {
+            p.chunks_exact(8)
+                .map(|c| CacheRef {
+                    x: i16::from_le_bytes([c[0], c[1]]) as i32,
+                    y: i16::from_le_bytes([c[2], c[3]]) as i32,
+                    hash: i32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let cache_adds = parts
+        .get(10)
+        .map(|p| {
+            p.chunks_exact(12)
+                .filter_map(|c| {
+                    let r = regions(&c[..8], true).into_iter().next()?;
+                    let hash = i32::from_le_bytes([c[8], c[9], c[10], c[11]]);
+                    Some(CacheAdd { r, hash })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Some(Frame {
         rects,
         pixels,
         frame_no,
         jpeg: parts.get(7).cloned().unwrap_or_default(),
         aux: parts.get(8).map(|p| regions(p, true)).unwrap_or_default(),
+        copy,
+        scroll,
+        cache_refs,
+        cache_adds,
     })
 }
 

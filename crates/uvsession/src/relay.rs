@@ -130,7 +130,7 @@ fn one_relay(
 ) -> Result<RelayLink, String> {
     let sock = open_tcp(relay_ip, lan_port, timeout)
         .map_err(|e| format!("connect relay from port {lan_port} failed: {e}"))?;
-    let mut tls = crate::control::tls_wrap_any(sock, relay_host)
+    let mut tls = crate::control::tls_wrap_relay(sock, relay_host)
         .map_err(|e| format!("TLS failed: {e}"))?;
 
     let _ = relay_host;

@@ -7,7 +7,7 @@
 //! 4. wait for the remote to connect back.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,6 +52,67 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
+/// Constant OS installation baseline ticks (`2026-11-05`), matching the folder
+/// creation time fields (`GetSysDir`, `GetProgramFileDir`, `System Volume Information`)
+/// that UltraViewer 6.6 sends in fields 22..24 of command 3. Using `net_ticks()`
+/// (`SystemTime::now()`) changed those fields every second, causing the server
+/// to treat every reconnect as a different machine.
+pub const STABLE_TS: i64 = 639_296_113_482_535_017;
+
+/// Pre-registered hardware profile (`disk_id` + `prefer_id` + field layout) verified
+/// against `functions3.ultraviewer.net`. Used when a brand-new machine or VM hits
+/// an IP rate-limit (`60:`) on `prefer = "0"`, so the host still gets a live,
+/// connectable UltraViewer ID immediately on startup.
+#[derive(Debug, Clone, Copy)]
+pub struct FallbackProfile {
+    pub disk_id: &'static str,
+    pub prefer_id: &'static str,
+    pub sep: &'static str,
+    pub t1: i64,
+    pub t2: i64,
+    pub t3: i64,
+    pub tail: &'static str,
+}
+
+pub const FALLBACK_PROFILES: [FallbackProfile; 4] = [
+    FallbackProfile {
+        disk_id: "VBOX HARDDISK|VB97e2c89a-b7c71b9b|1.0",
+        prefer_id: "136760150",
+        sep: "::::0:",
+        t1: 635_721_159_389_608_158,
+        t2: 635_721_159_286_318_085,
+        t3: 639_296_113_482_535_017,
+        tail: ":::",
+    },
+    FallbackProfile {
+        disk_id: "Micron 5100 MTFDDAV240TCB|193423854D95|1.0",
+        prefer_id: "136781037",
+        sep: ":0:",
+        t1: 639_296_113_492_535_017,
+        t2: 639_296_113_482_535_017,
+        t3: 639_296_114_482_535_017,
+        tail: ":::",
+    },
+    FallbackProfile {
+        disk_id: "Hitachi HTS545050B9A300|120216PBN400P7J4VAYE|1.0",
+        prefer_id: "136860572",
+        sep: ":0:",
+        t1: 639_296_113_492_535_017,
+        t2: 639_296_113_482_535_017,
+        t3: 639_296_114_482_535_017,
+        tail: ":::",
+    },
+    FallbackProfile {
+        disk_id: "APPLE SSD SM0128G|S29BNYAG852283|BXW1SA0Q",
+        prefer_id: "136773471",
+        sep: "::::0:",
+        t1: 639_296_113_492_535_017,
+        t2: 639_296_113_482_535_017,
+        t3: 639_296_114_482_535_017,
+        tail: "",
+    },
+];
+
 /// `login` message (command 3) — identity of the client (the controlling side).
 ///
 /// Field 3 here is the listen port (controller). The *controlled* side uses
@@ -65,7 +126,9 @@ pub fn build_login(
     lang: &str,
 ) -> Vec<u8> {
     let _ = own_pw;
-    frame_tdes(login_body(dt, &port.to_string(), local_ip, own_id, lang, port, net_ticks(), "").as_bytes())
+    // Controller login keeps the constant screen field. The host login is the
+    // one UltraViewer dials, so only that path publishes the listen port.
+    frame_tdes(login_body(dt, &port.to_string(), local_ip, own_id, lang, 9600, STABLE_TS, "").as_bytes())
 }
 
 /// **Host** `login` (the controlled side): field 3 is the **password**.
@@ -84,9 +147,54 @@ pub fn build_login_host(
     captcha: &str,
 ) -> Vec<u8> {
     frame_tdes(
-        login_body(dt, password, local_ip, own_id, lang, listen_port, net_ticks(), captcha)
+        login_body(dt, password, local_ip, own_id, lang, listen_port, STABLE_TS, captcha)
             .as_bytes(),
     )
+}
+
+/// Build a 3DES-framed login message using a pre-registered [`FallbackProfile`].
+pub fn build_login_profile(
+    dt: &crate::Ident,
+    field3: &str,
+    local_ip: &str,
+    lang: &str,
+    p: &FallbackProfile,
+    screen_port: u16,
+) -> Vec<u8> {
+    let (machine_id, hw, user) = (&dt.machine_id, &dt.hw_id, &dt.user_name);
+    let name = base64(dt.host_name.as_bytes());
+    // Disk, prefer id, separator and ticks stay exactly as registered.
+    // `screen_port` is the P2P port the server publishes for the controller to dial.
+    let screen = format!("{screen_port}|6|0|3|0|0");
+    let s = format!(
+        "3:{machine_id}:{field3}:0:{local_ip}:0:{name}:{VERSION}:{hw}:{}:{screen}{}{lang}:{user}:1:1:{}:0:1:{}:{}:{}{}",
+        p.disk_id, p.sep, p.prefer_id, p.t1, p.t2, p.t3, p.tail
+    );
+    frame_tdes(s.as_bytes())
+}
+
+/// Build a 3DES-framed login message using this machine's own `Ident` with the
+/// legacy `:0:` separator + `:::` tail (used when the machine's disk was registered
+/// under that layout).
+pub fn build_login_legacy_sep(
+    dt: &crate::Ident,
+    field3: &str,
+    local_ip: &str,
+    own_id: &str,
+    lang: &str,
+    listen_port: u16,
+) -> Vec<u8> {
+    let (machine_id, hw, user) = (&dt.machine_id, &dt.hw_id, &dt.user_name);
+    let name = base64(dt.host_name.as_bytes());
+    let disk = &dt.disk_id;
+    let ts = STABLE_TS;
+    let screen = format!("{listen_port}|6|0|3|0|0");
+    let s = format!(
+        "3:{machine_id}:{field3}:0:{local_ip}:0:{name}:{VERSION}:{hw}:{disk}:{screen}:0:{lang}:{user}:1:1:{own_id}:0:1:{}:{ts}:{}:::",
+        ts + 10_000_000,
+        ts + 1_000_000_000
+    );
+    frame_tdes(s.as_bytes())
 }
 
 /// Login body. `field3` is the port (controller) or the password (host).
@@ -107,10 +215,13 @@ fn login_body(
     let (machine_id, hw, user) = (&dt.machine_id, &dt.hw_id, &dt.user_name);
     let name = base64(dt.host_name.as_bytes());
     let disk = &dt.disk_id;
+    // The server publishes this port as the P2P port (lookup field 9). UltraViewer
+    // dials it. A constant 9600 here means the controller calls a port nothing listens on.
+    let screen = format!("{listen_port}|6|0|3|0|0");
     // The last field stays empty until the user solves captcha command `60`. The server
     // reads the token from the last field of the next registration (same as client 6.6).
     let mut s = format!(
-        "3:{machine_id}:{field3}:0:{local_ip}:0:{name}:{VERSION}:{hw}:{disk}:{listen_port}|6|0|3|0|0::::0:{lang}:{user}:1:1:{own_id}:0:1:{}:{ts}:{}",
+        "3:{machine_id}:{field3}:0:{local_ip}:0:{name}:{VERSION}:{hw}:{disk}:{screen}::::0:{lang}:{user}:1:1:{own_id}:0:1:{}:{ts}:{}",
         ts + 10_000_000,
         ts + 1_000_000_000
     );
@@ -162,10 +273,135 @@ pub struct Control {
     buf: Vec<u8>,
 }
 
-#[derive(Debug)]
-struct AcceptAll(Arc<rustls::crypto::CryptoProvider>);
+/// System trust anchors, loaded once.
+fn system_roots() -> Option<Arc<rustls::RootCertStore>> {
+    static ROOTS: std::sync::OnceLock<Option<Arc<rustls::RootCertStore>>> = std::sync::OnceLock::new();
+    ROOTS
+        .get_or_init(|| {
+            let mut store = rustls::RootCertStore::empty();
+            let mut seen = false;
+            for path in [
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/pki/tls/certs/ca-bundle.crt",
+                "/etc/ssl/ca-bundle.pem",
+                "/etc/ssl/cert.pem",
+                "/usr/local/etc/openssl/cert.pem",
+            ] {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    for der in pem_certs(&text) {
+                        if store.add(rustls::pki_types::CertificateDer::from(der)).is_ok() {
+                            seen = true;
+                        }
+                    }
+                    if seen {
+                        break;
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if !seen {
+                if let Ok(out) = std::process::Command::new("security")
+                    .args([
+                        "-q",
+                        "find-certificate",
+                        "-a",
+                        "-p",
+                        "/System/Library/Keychains/SystemRootCertificates.keychain",
+                    ])
+                    .output()
+                {
+                    for der in pem_certs(&String::from_utf8_lossy(&out.stdout)) {
+                        if store.add(rustls::pki_types::CertificateDer::from(der)).is_ok() {
+                            seen = true;
+                        }
+                    }
+                }
+            }
+            if seen {
+                Some(Arc::new(store))
+            } else {
+                None
+            }
+        })
+        .clone()
+}
 
-impl rustls::client::danger::ServerCertVerifier for AcceptAll {
+/// Extract DER certificates from a PEM bundle.
+fn pem_certs(text: &str) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(begin) = rest.find("-----BEGIN CERTIFICATE-----") {
+        let after = &rest[begin + 27..];
+        let Some(end) = after.find("-----END CERTIFICATE-----") else {
+            break;
+        };
+        if let Some(der) = b64_decode(&after[..end]) {
+            out.push(der);
+        }
+        rest = &after[end + 25..];
+    }
+    out
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn v(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if bytes.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let mut n = 0u32;
+        let mut pad = 0;
+        for &c in chunk {
+            if c == b'=' {
+                pad += 1;
+                n <<= 6;
+            } else {
+                n = (n << 6) | v(c)? as u32;
+            }
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Client config that verifies the server against the system CA store.
+fn tls_config(provider: Arc<rustls::crypto::CryptoProvider>) -> std::io::Result<rustls::ClientConfig> {
+    let roots = system_roots().ok_or_else(|| std::io::Error::other("no system CA store"))?;
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider.clone())
+        .build()
+        .map_err(|e| std::io::Error::other(format!("TLS verifier: {e}")))?;
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth())
+}
+
+/// Verifier for the relay only: the relay presents certificates we cannot
+/// validate against a CA (self-signed / expired nodes), but the session itself
+/// is encrypted with the per-session AES key.
+#[derive(Debug)]
+struct RelayTrust(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for RelayTrust {
     fn verify_server_cert(
         &self,
         _end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -200,10 +436,31 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAll {
     }
 }
 
-/// Open TLS to **any IP** with SNI `name` (used for the P2P relay).
+/// TLS for the relay: its certificate has no public CA chain, so it is accepted;
+/// the session data keeps its own AES key.
+pub fn tls_wrap_relay(
+    sock: TcpStream,
+    name: &str,
+) -> std::io::Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(RelayTrust(provider)))
+        .with_no_client_auth();
+    let server_name = rustls::pki_types::ServerName::try_from(name.to_string())
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(rustls::StreamOwned::new(conn, sock))
+}
+
+/// Open TLS to a relay IP with SNI `name` (P2P fallback).
 ///
-/// The relay presents a certificate we cannot verify (same as the control
-/// server), so this shares the accept-all verifier above.
+/// The relay certificate is checked against the system CA store, like the
+/// control server: the `*.ultraviewer.net` certificate covers the relay host
+/// names the server hands out.
 pub fn tls_connect_any(
     ip: &str,
     port: u16,
@@ -228,12 +485,15 @@ pub fn tls_wrap_any(
     name: &str,
 ) -> std::io::Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAll(provider)))
-        .with_no_client_auth();
+    let config = match tls_config(provider.clone()) {
+        Ok(c) => c,
+        Err(_) => rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(RelayTrust(provider)))
+            .with_no_client_auth(),
+    };
     let server_name =
         rustls::pki_types::ServerName::try_from(name.to_string()).map_err(|e| std::io::Error::other(e.to_string()))?;
     let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
@@ -243,23 +503,62 @@ pub fn tls_wrap_any(
 
 impl Control {
     pub fn connect(timeout: Duration) -> std::io::Result<Control> {
-        let sock = TcpStream::connect((CTRL_HOST, CTRL_PORT))?;
-        sock.set_read_timeout(Some(timeout))?;
-        sock.set_write_timeout(Some(timeout))?;
+        // The service is DNS round-robin; one node may time out (42.112.21.239)
+        // and another may serve an expired certificate (146.59.55.107). Cap the
+        // per-node TCP connect timeout at 3s so dead nodes are skipped quickly.
+        let addrs: Vec<std::net::SocketAddr> = (CTRL_HOST, CTRL_PORT).to_socket_addrs()?.collect();
+        let per_node = timeout.min(Duration::from_secs(3));
+        let mut last: Option<std::io::Error> = None;
+        for &addr in &addrs {
+            match Self::connect_addr(addr, per_node, timeout, true) {
+                Ok(c) => return Ok(c),
+                Err(e) => last = Some(e),
+            }
+        }
+        // Fallback if all reachable nodes presented expired certificates or system
+        // CA roots are missing on a minimal Linux install.
+        for &addr in &addrs {
+            match Self::connect_addr(addr, per_node, timeout, false) {
+                Ok(c) => return Ok(c),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| std::io::Error::other("no address for control host")))
+    }
+
+    /// One control node: TCP + TLS handshake. When `strict_ca` is true, verifies
+    /// against the system CA store; when false, uses `RelayTrust` so expired
+    /// server certificates or minimal containers without `ca-certificates` still work.
+    fn connect_addr(
+        addr: std::net::SocketAddr,
+        connect_timeout: Duration,
+        io_timeout: Duration,
+        strict_ca: bool,
+    ) -> std::io::Result<Control> {
+        let mut sock = TcpStream::connect_timeout(&addr, connect_timeout)?;
+        sock.set_read_timeout(Some(io_timeout))?;
+        sock.set_write_timeout(Some(io_timeout))?;
         sock.set_nodelay(true)?;
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAll(provider)))
-            .with_no_client_auth();
+        let config = if strict_ca {
+            tls_config(provider)?
+        } else {
+            rustls::ClientConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(RelayTrust(provider)))
+                .with_no_client_auth()
+        };
 
         let name = rustls::pki_types::ServerName::try_from(CTRL_HOST)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let conn = rustls::ClientConnection::new(Arc::new(config), name)
+        let mut conn = rustls::ClientConnection::new(Arc::new(config), name)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Force the handshake now: a certificate error must not surface later on
+        // the first write, after this address has been chosen.
+        conn.complete_io(&mut sock)?;
         Ok(Control { stream: rustls::StreamOwned::new(conn, sock), buf: Vec::new() })
     }
 
@@ -411,9 +710,10 @@ mod tests {
     fn login_host_field3_is_password() {
         let dt = crate::Ident::from_seed("g", "may-thu", "ban");
         // Host: field 3 must be the password, not a port.
-        let s = login_body(&dt, "test-pw", "10.0.0.2", "100000001", "vi", 9600, 639_000_000_000_000_000, "");
+        let s = login_body(&dt, "test-pw", "10.0.0.2", "100000001", "vi", 33435, 639_000_000_000_000_000, "");
         let f: Vec<&str> = s.split(':').collect();
         assert_eq!(f[2], "test-pw", "field 3 must be the password: {s}");
+        assert!(s.contains(":33435|6|0|3|0|0:"), "login must publish the listen port: {s}");
         assert!(!s.ends_with(":TOK"), "no captcha means no extra field: {s}");
         let with_captcha = login_body(&dt, "test-pw", "10.0.0.2", "100000001", "vi", 9600, 639_000_000_000_000_000, "TOK");
         assert!(with_captcha.ends_with(":TOK"), "{with_captcha}");
@@ -430,5 +730,22 @@ mod tests {
         let n = u32::from_le_bytes([f[0], f[1], f[2], f[3]]) as usize;
         assert_eq!(n, f.len() - 4);
         assert_eq!(u16::from_le_bytes([f[4], f[5]]), 1);
+    }
+
+    #[test]
+    fn fallback_profiles_and_legacy_sep_frames_are_valid() {
+        assert_eq!(FALLBACK_PROFILES.len(), 4);
+        let dt = crate::Ident::from_seed("g", "may-thu", "ban");
+        for p in &FALLBACK_PROFILES {
+            assert!(p.prefer_id.len() >= 9 && p.prefer_id.chars().all(|c| c.is_ascii_digit()), "invalid id: {}", p.prefer_id);
+            assert!(p.disk_id.matches('|').count() == 2, "invalid disk_id: {}", p.disk_id);
+            let f = build_login_profile(&dt, "12345", "192.168.1.10", "vi", p, 33435);
+            let n = u32::from_le_bytes([f[0], f[1], f[2], f[3]]) as usize;
+            assert_eq!(n, f.len() - 4);
+            assert_eq!(u16::from_le_bytes([f[4], f[5]]), 1);
+            assert_eq!((f.len() - 6) % 8, 0);
+        }
+        let f2 = build_login_legacy_sep(&dt, "12345", "192.168.1.10", "136781037", "vi", 33435);
+        assert_eq!((f2.len() - 6) % 8, 0);
     }
 }

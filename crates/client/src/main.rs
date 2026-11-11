@@ -71,6 +71,29 @@ fn bind_ime_x11() {
     eprintln!("[x-remote] fcitx5 IME for {display}: {}", if attached { "connected" } else { "unavailable" });
 }
 
+/// Run the UI through XWayland when an X display is available.
+///
+/// On a Wayland session (GNOME, KDE Plasma) the chat panel, its button and the
+/// about box are immediate viewports drawn inside the main frame. With vsync on,
+/// `eglSwapBuffers` for a window the compositor does not show (covered by the
+/// fullscreen session, minimized, on another desktop) waits for a frame callback
+/// that never comes, the whole UI thread stops, and the desktop reports
+/// "X-Remote is not responding" over a black session. Wayland also ignores the
+/// window positions and always-on-top level the chat panel relies on.
+/// `XREMOTE_WAYLAND=1` keeps native Wayland.
+#[cfg(target_os = "linux")]
+fn prefer_x11() {
+    if std::env::var_os("XREMOTE_WAYLAND").is_some() {
+        return;
+    }
+    let has_x = std::env::var("DISPLAY").is_ok_and(|s| !s.is_empty());
+    if has_x && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        // Still single-threaded here, so changing the environment is safe.
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("WAYLAND_SOCKET");
+    }
+}
+
 /// Window icon. Straight RGBA, 128×128, scaled from `x-remote-logo.png`.
 fn window_icon() -> egui::IconData {
     const N: u32 = 128;
@@ -84,6 +107,9 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    #[cfg(target_os = "linux")]
+    prefer_x11();
+
     let mut engine: Option<String> = None;
     let mut autoconnect = false;
     let mut screenshot: Option<String> = None;
@@ -114,10 +140,14 @@ fn main() -> Result<(), eframe::Error> {
         }
     }
 
-    // No `--own-id`: use this machine's saved ID, stable across launches.
+    // No `--own-id`: use the server-assigned host ID. A random / never-registered
+    // ID makes the server answer `60:` (captcha) and every lookup return `8:99`.
     if own_id.trim().is_empty() {
-        if let Some(path) = ui::id_file() {
-            own_id = ui::stored_id(&path);
+        own_id = uvsession::host::default_initial_id();
+        if own_id.is_empty() {
+            if let Some(path) = ui::id_file() {
+                own_id = ui::stored_id(&path);
+            }
         }
     }
 
@@ -131,6 +161,10 @@ fn main() -> Result<(), eframe::Error> {
             .with_icon(window_icon())
             .with_app_id("x-remote")
             .with_title("X-Remote"),
+        // Linux: a vsync'd swap on a hidden immediate viewport (chat panel under the
+        // fullscreen session) blocks the UI thread forever on Wayland and some X11
+        // compositors. Repaints are event-driven, so no vsync costs nothing visible.
+        vsync: !cfg!(target_os = "linux"),
         ..Default::default()
     };
 

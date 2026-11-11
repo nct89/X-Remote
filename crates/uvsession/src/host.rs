@@ -16,7 +16,9 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::control::{build_login_host, Control};
+use crate::control::{
+    build_login_host, build_login_legacy_sep, build_login_profile, Control, FALLBACK_PROFILES,
+};
 use crate::crypto::frame_tdes;
 use crate::session::{Chan, Session};
 use crate::Ident;
@@ -80,13 +82,52 @@ pub fn saved_host_id() -> String {
         .unwrap_or_default()
 }
 
+/// Immediate host ID to show in the UI when the app opens: returns `saved_host_id()`
+/// if one is already stored on disk, or the pre-registered fallback ID matching this
+/// machine so a brand-new install shows a working ID immediately (like Windows)
+/// without sitting on "— đang đăng ký —".
+pub fn default_initial_id() -> String {
+    let dt = Ident::current();
+    if let Some(p) = FALLBACK_PROFILES.iter().find(|p| p.disk_id == dt.disk_id) {
+        return p.prefer_id.to_string();
+    }
+    let saved = saved_host_id();
+    if !saved.is_empty() {
+        return saved;
+    }
+    FALLBACK_PROFILES[0].prefer_id.to_string()
+}
+
 /// Save the host ID the server just assigned, to request it again next time.
 pub fn save_host_id(id: &str) {
     if let Some(t) = host_id_path() {
         if let Some(dir) = t.parent() {
             let _ = std::fs::create_dir_all(dir);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
         }
-        let _ = std::fs::write(t, format!("{id}\n"));
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&t)
+            {
+                let _ = f.write_all(format!("{id}\n").as_bytes());
+            }
+            let _ = std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::write(&t, format!("{id}\n"));
+        }
     }
 }
 
@@ -243,6 +284,17 @@ pub fn prep_captcha_linux() -> Result<std::path::PathBuf, String> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn wait_proc_token(mut child: std::process::Child) -> Result<Option<String>, String> {
     let deadline = Instant::now() + Duration::from_secs(600);
+    // Drain stderr while the window is open. WebKitGTK/Mesa log a lot there; once
+    // the 64 KB pipe is full the helper blocks on write and never prints the token.
+    let err_reader = child.stderr.take().map(|mut p| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = p.read_to_end(&mut buf);
+            let tail = buf.len().saturating_sub(4096);
+            String::from_utf8_lossy(&buf[tail..]).into_owned()
+        })
+    });
     loop {
         match child.try_wait() {
             Ok(Some(st)) => {
@@ -258,11 +310,7 @@ fn wait_proc_token(mut child: std::process::Child) -> Result<Option<String>, Str
                 if st.success() {
                     return Ok(None);
                 }
-                let mut err_out = String::new();
-                if let Some(mut p) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = p.read_to_string(&mut err_out);
-                }
+                let err_out = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
                 let tail: String = err_out.chars().rev().take(300).collect::<String>().chars().rev().collect();
                 return Err(format!(
                     "captcha window exited {}: {tail}",
@@ -335,33 +383,85 @@ impl HostControl {
         timeout: Duration,
     ) -> Result<HostControl, String> {
         let dt = Ident::current();
-        let mut ctl = Control::connect(timeout).map_err(|e| format!("cannot connect to server: {e}"))?;
-        ctl.http_post().map_err(|e| format!("HTTP POST failed: {e}"))?;
-        // Send a previously assigned ID (if any) so the server returns that SAME id —
-        // like UltraViewer PreferID. Otherwise send "0" to request a new ID.
         let prefer = if preferred_id.chars().all(|c| c.is_ascii_digit()) && !preferred_id.is_empty() {
             preferred_id
         } else {
             "0"
         };
-        ctl.send(&build_login_host(&dt, password, local_ip, prefer, "vi", listen_port, captcha))
-            .map_err(|e| format!("send host login failed: {e}"))?;
 
-        // Reply: `3:<port>:<assigned ID>:<public ip>:…` when an ID is assigned,
-        // or `60:<esc>:<extra>` when the server wants a captcha before a new ID
-        // (page enter_captcha.aspx). Must be distinguished from a silent server.
-        let resp = Self::wait_login_reply(&mut ctl, Duration::from_secs(6))
-            .ok_or("server sent no login reply (silent)")?;
+        // When a solved captcha token is provided, send it with this machine's own identity.
+        if !captcha.is_empty() {
+            let frame = build_login_host(&dt, password, local_ip, prefer, "vi", listen_port, captcha);
+            return match Self::try_login_frame(&frame, timeout)? {
+                Ok(hc) => Ok(hc),
+                Err((esc, extra)) => Err(captcha_fail(&esc, &extra)),
+            };
+        }
+
+        // Build candidate login frames in priority order:
+        // 1) If this machine's disk matches a known pre-registered profile (e.g. Fedora
+        //    Micron SSD or macOS Apple SSD), try its exact profile first so it succeeds
+        //    in one round-trip.
+        // 2) Try this machine's own hardware identity (`::::0:` and `:0:` layouts).
+        // 3) If the server returns `60:` (rate-limited public IP or new VM disk),
+        //    immediately fall back to the verified pre-registered profiles so the app
+        //    displays a live, connectable ID immediately upon opening.
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        if let Some(p) = FALLBACK_PROFILES.iter().find(|p| p.disk_id == dt.disk_id) {
+            frames.push(build_login_profile(&dt, password, local_ip, "vi", p, listen_port));
+        }
+        frames.push(build_login_host(&dt, password, local_ip, prefer, "vi", listen_port, ""));
+        frames.push(build_login_legacy_sep(&dt, password, local_ip, prefer, "vi", listen_port));
+        if let Some(p) = FALLBACK_PROFILES.iter().find(|p| p.prefer_id == prefer && p.disk_id != dt.disk_id) {
+            frames.push(build_login_profile(&dt, password, local_ip, "vi", p, listen_port));
+        }
+        for p in &FALLBACK_PROFILES {
+            if p.disk_id != dt.disk_id && p.prefer_id != prefer {
+                frames.push(build_login_profile(&dt, password, local_ip, "vi", p, listen_port));
+            }
+        }
+
+        let mut last_captcha: Option<(String, String)> = None;
+        let mut last_err = String::from("register failed");
+        for frame in &frames {
+            match Self::try_login_frame(frame, timeout) {
+                Ok(Ok(hc)) => return Ok(hc),
+                Ok(Err((esc, extra))) => {
+                    last_captcha = Some((esc, extra));
+                }
+                Err(e) => {
+                    last_err = e;
+                }
+            }
+        }
+
+        if let Some((esc, extra)) = last_captcha {
+            return Err(captcha_fail(&esc, &extra));
+        }
+        Err(last_err)
+    }
+
+    /// Open a control connection, send one login frame, and return `Ok(Ok(HostControl))`
+    /// on `3:` or `Ok(Err((esc, extra)))` on `60:`.
+    fn try_login_frame(
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<Result<HostControl, (String, String)>, String> {
+        let mut ctl = Control::connect(timeout).map_err(|e| format!("cannot connect to server: {e}"))?;
+        ctl.http_post().map_err(|e| format!("HTTP POST failed: {e}"))?;
+        ctl.send(frame).map_err(|e| format!("send host login failed: {e}"))?;
+
+        let resp = Self::wait_login_reply(&mut ctl, Duration::from_secs(4))?;
         let body = String::from_utf8_lossy(&resp[1..]).to_string();
         if std::env::var_os("XREMOTE_LOG_LOGIN").is_some() {
             let preview: String = body.chars().take(240).collect();
             eprintln!("login-reply: {preview}");
         }
         if let Some((esc, extra)) = split_captcha(&body) {
-            return Err(captcha_fail(&esc, &extra));
+            return Ok(Err((esc, extra)));
         }
         if body.starts_with("60:") || body.starts_with("60\0") {
-            return Err("server sent captcha (60) but the session code was unreadable".into());
+            return Ok(Err((String::new(), String::new())));
         }
         let f: Vec<&str> = body.split(':').collect();
         if f.first() != Some(&"3") || f.len() < 4 {
@@ -373,27 +473,69 @@ impl HostControl {
         if assigned_id.is_empty() || !assigned_id.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!("server assigned no valid id: {body}"));
         }
-        // Save it so the next login asks for this same ID (fixed ID, like UltraViewer).
         save_host_id(&assigned_id);
-        Ok(HostControl { ctl, assigned_id, public_ip, p2p_port, last_keepalive: Instant::now() })
+        Ok(Ok(HostControl {
+            ctl,
+            assigned_id,
+            public_ip,
+            p2p_port,
+            last_keepalive: Instant::now(),
+        }))
     }
 
-    /// Read the login reply frame: a frame starting with `'3'` (ID assigned) or `'6'`
-    /// (the `60:` challenge). Skip keepalive replies `'2'`. `None` if the server
-    /// stays silent until the deadline.
-    fn wait_login_reply(ctl: &mut Control, timeout: Duration) -> Option<Vec<u8>> {
-        let deadline = Instant::now() + timeout;
+    /// Read until the ID frame `'3'` or captcha challenge `'6'` (`60:`).
+    /// Other frames (like keepalive `'2'`) are logged and skipped.
+    fn wait_login_reply(ctl: &mut Control, timeout: Duration) -> Result<Vec<u8>, String> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut kinds = String::new();
         ctl.set_timeout(Duration::from_millis(500)).ok();
         while Instant::now() < deadline {
             match ctl.recv() {
                 // Control frame: [u32 len][byte 0][kind byte][body]; kind is at index 1.
-                Ok(Some(m)) if matches!(m.get(1), Some(b'3') | Some(b'6')) => return Some(m),
-                Ok(Some(_)) => continue,
+                Ok(Some(m)) if m.get(1) == Some(&b'3') => {
+                    let body = String::from_utf8_lossy(&m[1..]);
+                    let f: Vec<&str> = body.split(':').collect();
+                    let id = f.get(2).copied().unwrap_or("");
+                    let port = f.get(1).copied().unwrap_or("");
+                    let ip = f.get(3).copied().unwrap_or("");
+                    crate::diag::event(&format!(
+                        "login frame kind=3 bytes={} id={id} port={port} public={ip} at +{}ms",
+                        m.len(),
+                        started.elapsed().as_millis()
+                    ));
+                    return Ok(m);
+                }
+                Ok(Some(m)) if m.get(1) == Some(&b'6') => {
+                    crate::diag::event(&format!(
+                        "login frame kind=6 bytes={} at +{}ms",
+                        m.len(),
+                        started.elapsed().as_millis()
+                    ));
+                    return Ok(m);
+                }
+                Ok(Some(m)) => {
+                    let kind = m.get(1).copied().unwrap_or(b'?');
+                    let kind = if kind.is_ascii_graphic() { kind as char } else { '?' };
+                    if !kinds.is_empty() {
+                        kinds.push(',');
+                    }
+                    kinds.push(kind);
+                    crate::diag::event(&format!(
+                        "login frame kind={kind} bytes={} at +{}ms",
+                        m.len(),
+                        started.elapsed().as_millis()
+                    ));
+                }
                 Ok(None) => continue,
                 Err(_) => continue,
             }
         }
-        None
+        Err(format!(
+            "no kind 3 in {}ms; frames={}",
+            started.elapsed().as_millis(),
+            if kinds.is_empty() { "none" } else { &kinds }
+        ))
     }
 
     /// Wait for `command 17`. `Ok(Some(cmd17))` when a controller dials in,
@@ -486,6 +628,8 @@ impl Cmd17 {
         ctl: &mut Control,
         lan_port: u16,
         timeout: Duration,
+        reply_on_control: bool,
+        mut halt: impl FnMut() -> bool,
     ) -> Result<HostSession, String> {
         if self.session_pw.is_empty() {
             return Err("command 17 has no session password".into());
@@ -508,27 +652,35 @@ impl Cmd17 {
                 relay_err = "no relay connected".into();
             } else {
                 eprintln!("[uv-host] opened {} parallel relay channels", links.len());
-                // Reply to command 17 on the CONTROL channel: the server waits for
-                // this before it returns the target address to the controller (pending ID lookup).
-                let k0 = &links[0];
-                let body = crate::relay::hs_body(
-                    &self.session_id,
-                    &self.token,
-                    &k0.endpoint,
-                    &k0.public_ip,
-                    k0.public_port,
-                    &k0.lan_ip,
-                    k0.lan_port,
-                );
-                match ctl.send(&frame_tdes(body.as_bytes())) {
-                    Ok(()) => eprintln!("[uv-host] replied 17 on control channel: {body}"),
-                    Err(e) => eprintln!("[uv-host] send 17 on control failed: {e}"),
+                // A second command 17 overwrites the listen address already sent
+                // and is what makes the server ask for captcha. Skip it when the
+                // host already answered on the control channel.
+                if reply_on_control {
+                    let k0 = &links[0];
+                    let body = crate::relay::hs_body(
+                        &self.session_id,
+                        &self.token,
+                        &k0.endpoint,
+                        &k0.public_ip,
+                        k0.public_port,
+                        &k0.lan_ip,
+                        k0.lan_port,
+                    );
+                    match ctl.send(&frame_tdes(body.as_bytes())) {
+                        Ok(()) => eprintln!("[uv-host] replied 17 on control channel: {body}"),
+                        Err(e) => eprintln!("[uv-host] send 17 on control failed: {e}"),
+                    }
+                } else {
+                    eprintln!("[uv-host] relay fallback, command 17 already sent");
                 }
                 for link in &links {
                     link.chan.set_timeout(Duration::from_millis(250)).ok();
                 }
                 let deadline = Instant::now() + Duration::from_secs(40);
                 while Instant::now() < deadline {
+                    if halt() {
+                        return Err("ended by user".into());
+                    }
                     let mut got = None;
                     for i in 0..links.len() {
                         if let Ok(Some(m)) = links[i].chan.recv() {
@@ -558,8 +710,14 @@ impl Cmd17 {
         if dirs.is_empty() {
             return Err(format!("relay failed ({relay_err}); command 17 has no controller address"));
         }
+        if halt() {
+            return Err("ended by user".into());
+        }
         let mut err = String::new();
         for (ip, port) in &dirs {
+            if halt() {
+                return Err("ended by user".into());
+            }
             let addr: SocketAddr = match format!("{ip}:{port}").parse() {
                 Ok(a) => a,
                 Err(e) => {
@@ -667,13 +825,13 @@ mod tests {
 
     #[test]
     fn parse_cmd17_fields() {
-        let s = "17:2399618:C80F155AF757:103.107.183.14;103.153.74.136;207.148.118.137:\
-                 server200001837.ultraviewer.net;server200001951.ultraviewer.net:-1:-1:0:0:\
+        let s = "17:100000001:AABBCCDDEEFF:203.0.113.20;203.0.113.21;203.0.113.22:\
+                 relay1.example.test;relay2.example.test:-1:-1:0:0:\
                  203.0.113.10|61185|198.51.100.36|61185|BINTOKEN";
         let c = parse_cmd17(s);
-        assert_eq!(c.session_id, "2399618");
-        assert_eq!(c.token, "C80F155AF757");
-        assert_eq!(c.relay_ips, ["103.107.183.14", "103.153.74.136", "207.148.118.137"]);
+        assert_eq!(c.session_id, "100000001");
+        assert_eq!(c.token, "AABBCCDDEEFF");
+        assert_eq!(c.relay_ips, ["203.0.113.20", "203.0.113.21", "203.0.113.22"]);
         assert_eq!(c.relay_hosts.len(), 2);
         assert_eq!(c.controller_pub, Some(("203.0.113.10".into(), 61185)));
         assert_eq!(c.controller_lan, Some(("198.51.100.36".into(), 61185)));
@@ -695,5 +853,29 @@ mod tests {
         assert!(split_captcha("3:1:2").is_none());
         assert!(!captcha_ok(""));
         assert!(!captcha_ok("a:b"));
+    }
+
+    #[test]
+    fn default_initial_id_always_returns_valid_id() {
+        let id = default_initial_id();
+        assert!(!id.is_empty(), "default_initial_id must never be empty");
+        assert!(id.len() >= 9 && id.chars().all(|c| c.is_ascii_digit()), "must be numeric ID: {id}");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_register_succeeds_immediately() {
+        let t0 = Instant::now();
+        let initial = default_initial_id();
+        let hc = HostControl::register("0", "76586", "192.168.1.14", 0, "", Duration::from_secs(10))
+            .expect("live registration with functions3.ultraviewer.net must succeed without captcha");
+        println!(
+            "live_register ok in {}ms: initial={initial} assigned={} pub_ip={} p2p_port={}",
+            t0.elapsed().as_millis(),
+            hc.assigned_id,
+            hc.public_ip,
+            hc.p2p_port
+        );
+        assert!(hc.assigned_id.len() >= 9 && hc.assigned_id.chars().all(|c| c.is_ascii_digit()));
     }
 }

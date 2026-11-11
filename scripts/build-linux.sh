@@ -10,6 +10,8 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.cargo/bin:$PATH"
+# Keep build-machine paths (and user names) out of the binaries.
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$ROOT=/build/x-remote"
 
 VERSION="$(awk -F\" '/^version/{print $2; exit}' Cargo.toml)"
 [ -n "$VERSION" ] || VERSION="0.1.0"
@@ -19,12 +21,56 @@ DIST="$ROOT/dist"
 PKG="$ROOT/packaging"
 BIN_SRC="$ROOT/target/release/uvclient"
 
-echo "==> cargo build --release -p uvclient"
-cargo build --release -p uvclient
+# Build against an old glibc so one binary runs on every distro. A binary built on
+# the host links the host glibc (Fedora 44 -> GLIBC_2.43: acosf/atan2f), and then
+# fails at start on Ubuntu 22.04/24.04, Debian 12, Mint, RHEL 9, openSUSE Leap.
+# Debian bullseye = glibc 2.31. LOCAL_BUILD=1 builds on the host instead.
+BUILD_IMAGE="${BUILD_IMAGE:-docker.io/library/rust:1.88-bullseye}"
+ENGINE=""
+if [ -z "${LOCAL_BUILD:-}" ]; then
+    for e in podman docker; do
+        command -v "$e" >/dev/null 2>&1 && { ENGINE="$e"; break; }
+    done
+fi
+if [ -n "$ENGINE" ]; then
+    echo "==> cargo build --release -p uvclient (in $BUILD_IMAGE via $ENGINE)"
+    BIN_SRC="$ROOT/target/compat/release/uvclient"
+    mkdir -p "$ROOT/target/compat-cargo"
+    USER_ARGS=""
+    [ "$ENGINE" = docker ] && USER_ARGS="-u $(id -u):$(id -g)"
+    # shellcheck disable=SC2086
+    "$ENGINE" run --rm $USER_ARGS \
+        -v "$ROOT":/build/x-remote:z \
+        -v "$ROOT/target/compat-cargo":/cargo-home:z \
+        -w /build/x-remote \
+        -e CARGO_HOME=/cargo-home \
+        -e CARGO_TARGET_DIR=/build/x-remote/target/compat \
+        -e RUSTFLAGS="--remap-path-prefix=/cargo-home=/cargo" \
+        "$BUILD_IMAGE" cargo build --release --locked -p uvclient
+else
+    echo "==> cargo build --release -p uvclient (host toolchain)"
+    echo "    WARNING: binary needs this machine's glibc or newer; use podman/docker for a portable build" >&2
+    cargo build --release -p uvclient
+fi
 [ -x "$BIN_SRC" ] || { echo "missing $BIN_SRC" >&2; exit 1; }
 
-rm -rf "$DIST"
+# Lowest glibc the binary accepts (goes into the .deb/.rpm dependencies).
+GLIBC_MIN="2.31"
+if command -v objdump >/dev/null 2>&1; then
+    g="$(objdump -T "$BIN_SRC" | grep -v ' w ' | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)"
+    [ -n "$g" ] && GLIBC_MIN="$g"
+fi
+echo "    needs glibc >= $GLIBC_MIN"
+
+# The screen-frame dictionary is third-party (see .gitignore / README): ship it only on request.
+DICT=""
+if [ -n "${BUNDLE_DICT:-}" ] && [ -f "$PKG/8bit.dat" ]; then
+    DICT="$PKG/8bit.dat"
+fi
+
+# Clear only this script's outputs (keep e.g. dist/X-Remote.flatpak from build-flatpak.sh).
 mkdir -p "$DIST"
+rm -rf "$DIST/x-remote" "$DIST"/x-remote[-_]* "$DIST/X-Remote.AppDir" "$DIST/X-Remote-x86_64.AppImage" "$DIST/deb" "$DIST/rpmbuild"
 install -m 755 "$BIN_SRC" "$DIST/x-remote"
 
 # ---------- portable tarball ----------
@@ -36,6 +82,7 @@ install -m 755 "$BIN_SRC" "$TREE/x-remote"
 install -m 644 "$PKG/x-remote.desktop" "$TREE/x-remote.desktop"
 install -m 644 "$ROOT/README.md" "$TREE/README.md"
 install -m 644 "$ROOT/LICENSE" "$TREE/LICENSE"
+[ -n "$DICT" ] && install -m 644 "$DICT" "$TREE/8bit.dat"
 mkdir -p "$TREE/icons/32x32/apps" "$TREE/icons/48x48/apps" "$TREE/icons/64x64/apps" \
          "$TREE/icons/128x128/apps" "$TREE/icons/256x256/apps"
 [ -f "$PKG/icon-32.png" ] && install -m 644 "$PKG/icon-32.png" "$TREE/icons/32x32/apps/x-remote.png"
@@ -55,6 +102,7 @@ SHARE="$PREFIX/share"
 DEST="$HOME/.local/share/x-remote"
 mkdir -p "$BIN" "$SHARE/applications" "$SHARE/icons/hicolor" "$DEST"
 install -m 755 "$HERE/x-remote" "$DEST/x-remote"
+[ -f "$HERE/8bit.dat" ] && install -m 644 "$HERE/8bit.dat" "$DEST/8bit.dat"
 cat > "$BIN/x-remote" <<EOF
 #!/bin/sh
 exec "$DEST/x-remote" "\$@"
@@ -85,6 +133,7 @@ APPDIR="$DIST/X-Remote.AppDir"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/metainfo" \
+         "$APPDIR/usr/share/x-remote" \
          "$APPDIR/usr/share/icons/hicolor/32x32/apps" \
          "$APPDIR/usr/share/icons/hicolor/48x48/apps" \
          "$APPDIR/usr/share/icons/hicolor/64x64/apps" \
@@ -94,6 +143,7 @@ install -m 755 "$BIN_SRC" "$APPDIR/usr/bin/x-remote"
 install -m 644 "$PKG/x-remote.desktop" "$APPDIR/x-remote.desktop"
 install -m 644 "$PKG/x-remote.desktop" "$APPDIR/usr/share/applications/x-remote.desktop"
 install -m 644 "$PKG/net.xremote.app.metainfo.xml" "$APPDIR/usr/share/metainfo/net.xremote.app.metainfo.xml"
+[ -n "$DICT" ] && install -m 644 "$DICT" "$APPDIR/usr/share/x-remote/8bit.dat"
 [ -f "$PKG/icon-32.png" ] && install -m 644 "$PKG/icon-32.png" "$APPDIR/usr/share/icons/hicolor/32x32/apps/x-remote.png"
 [ -f "$PKG/icon-48.png" ] && install -m 644 "$PKG/icon-48.png" "$APPDIR/usr/share/icons/hicolor/48x48/apps/x-remote.png"
 [ -f "$PKG/icon-64.png" ] && install -m 644 "$PKG/icon-64.png" "$APPDIR/usr/share/icons/hicolor/64x64/apps/x-remote.png"
@@ -113,11 +163,18 @@ chmod 755 "$APPDIR/AppRun"
 TOOLDIR="$DIST/.tools"
 mkdir -p "$TOOLDIR"
 TOOL="$TOOLDIR/appimagetool-x86_64.AppImage"
+# Pinned build tool: update this hash only after reviewing a new appimagetool.
+TOOL_SHA256="e8c1169c4af66c3184d7ee110713d4be04befe671fa358e2c1591ee840553b03"
 if [ ! -x "$TOOL" ]; then
     echo "    downloading appimagetool…"
     curl -fsSL -o "$TOOL" \
         "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
     chmod +x "$TOOL"
+fi
+if ! printf '%s  %s\n' "$TOOL_SHA256" "$TOOL" | sha256sum -c --status 2>/dev/null; then
+    echo "appimagetool checksum mismatch — refusing to run it" >&2
+    rm -f "$TOOL"
+    exit 1
 fi
 if ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" \
         "$DIST/X-Remote-x86_64.AppImage"; then
@@ -134,6 +191,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
     mkdir -p "$DEB/DEBIAN" "$DEB/usr/bin" "$DEB/usr/share/applications" \
              "$DEB/usr/share/doc/x-remote" \
              "$DEB/usr/share/metainfo" \
+             "$DEB/usr/share/x-remote" \
              "$DEB/usr/share/icons/hicolor/32x32/apps" \
              "$DEB/usr/share/icons/hicolor/48x48/apps" \
              "$DEB/usr/share/icons/hicolor/64x64/apps" \
@@ -142,6 +200,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
     install -m 755 "$BIN_SRC" "$DEB/usr/bin/x-remote"
     install -m 644 "$PKG/x-remote.desktop" "$DEB/usr/share/applications/x-remote.desktop"
     install -m 644 "$PKG/net.xremote.app.metainfo.xml" "$DEB/usr/share/metainfo/net.xremote.app.metainfo.xml"
+    [ -n "$DICT" ] && install -m 644 "$DICT" "$DEB/usr/share/x-remote/8bit.dat"
     install -m 644 "$ROOT/LICENSE" "$DEB/usr/share/doc/x-remote/copyright"
     install -m 644 "$ROOT/README.md" "$DEB/usr/share/doc/x-remote/README.md"
     [ -f "$PKG/icon-32.png" ] && install -m 644 "$PKG/icon-32.png" "$DEB/usr/share/icons/hicolor/32x32/apps/x-remote.png"
@@ -158,14 +217,14 @@ Priority: optional
 Architecture: $ARCH_DEB
 Installed-Size: $SIZE_KB
 Maintainer: X-Remote authors
-Homepage: https://github.com
-Depends: libc6, libx11-6, libxcursor1, libxi6, libxrandr2, libxext6, libgl1
+Homepage: https://github.com/nct89/X-Remote
+Depends: libc6 (>= $GLIBC_MIN), libgcc-s1, libx11-6, libx11-xcb1, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libxcursor1, libxi6, libxrandr2, libxext6, libegl1 | libgl1, ca-certificates
 Recommends: gir1.2-webkit2-4.1, python3-gi
 Description: Native remote-desktop client
  Control a Windows UltraViewer host from Linux. Connect by ID and password,
  stream the remote screen, and forward mouse and keyboard.
 EOF
-    dpkg-deb --build --root-owner-group "$DEB" \
+    dpkg-deb -Zxz --build --root-owner-group "$DEB" \
         "$DIST/x-remote_${VERSION}_${ARCH_DEB}.deb"
     rm -rf "$DEB"
 else
@@ -179,17 +238,27 @@ if command -v rpmbuild >/dev/null 2>&1; then
     rm -rf "$RPMDIR"
     mkdir -p "$RPMDIR/BUILD" "$RPMDIR/RPMS" "$RPMDIR/SOURCES" "$RPMDIR/SPECS" "$RPMDIR/SRPMS"
 
+    RPM_DICT_INSTALL=""
+    RPM_DICT_FILE=""
+    if [ -n "$DICT" ]; then
+        RPM_DICT_INSTALL="install -m 644 $DICT %{buildroot}/usr/share/x-remote/8bit.dat"
+        RPM_DICT_FILE="/usr/share/x-remote/8bit.dat"
+    fi
     cat > "$RPMDIR/SPECS/x-remote.spec" <<EOF
 Name:           x-remote
 Version:        $VERSION
-Release:        1%{?dist}
+Release:        1
 Summary:        Native remote-desktop client
 License:        MIT
-URL:            https://github.com
+URL:            https://github.com/nct89/X-Remote
 AutoReqProv:    no
 BuildArch:      $ARCH_RPM
-Requires:       glibc, libgcc, libX11, libXcursor, libXi, libXrandr, libXext, mesa-libGL
-Recommends:     webkit2gtk4.1, python3-gobject
+Requires:       libc.so.6(GLIBC_$GLIBC_MIN)(64bit), libgcc_s.so.1()(64bit)
+Requires:       libX11.so.6()(64bit), libX11-xcb.so.1()(64bit), libxcb.so.1()(64bit)
+Requires:       libxkbcommon.so.0()(64bit), libxkbcommon-x11.so.0()(64bit)
+Requires:       libXcursor.so.1()(64bit), libXi.so.6()(64bit), libXrandr.so.2()(64bit), libXext.so.6()(64bit)
+Requires:       libEGL.so.1()(64bit)
+Recommends:     (webkit2gtk4.1 or libwebkit2gtk-4_1-0), (python3-gobject or python3-gobject-Gdk)
 
 %description
 Control a Windows UltraViewer host from Linux. Connect by ID and password,
@@ -204,6 +273,7 @@ mkdir -p %{buildroot}/usr/bin \\
          %{buildroot}/usr/share/applications \\
          %{buildroot}/usr/share/doc/x-remote \\
          %{buildroot}/usr/share/metainfo \\
+         %{buildroot}/usr/share/x-remote \\
          %{buildroot}/usr/share/icons/hicolor/32x32/apps \\
          %{buildroot}/usr/share/icons/hicolor/48x48/apps \\
          %{buildroot}/usr/share/icons/hicolor/64x64/apps \\
@@ -212,6 +282,7 @@ mkdir -p %{buildroot}/usr/bin \\
 install -m 755 $BIN_SRC %{buildroot}/usr/bin/x-remote
 install -m 644 $PKG/x-remote.desktop %{buildroot}/usr/share/applications/x-remote.desktop
 install -m 644 $PKG/net.xremote.app.metainfo.xml %{buildroot}/usr/share/metainfo/net.xremote.app.metainfo.xml
+$RPM_DICT_INSTALL
 install -m 644 $ROOT/LICENSE %{buildroot}/usr/share/doc/x-remote/LICENSE
 install -m 644 $ROOT/README.md %{buildroot}/usr/share/doc/x-remote/README.md
 install -m 644 $PKG/icon-32.png %{buildroot}/usr/share/icons/hicolor/32x32/apps/x-remote.png
@@ -224,6 +295,7 @@ install -m 644 $PKG/icon.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/x
 /usr/bin/x-remote
 /usr/share/applications/x-remote.desktop
 /usr/share/metainfo/net.xremote.app.metainfo.xml
+$RPM_DICT_FILE
 /usr/share/doc/x-remote/LICENSE
 /usr/share/doc/x-remote/README.md
 /usr/share/icons/hicolor/32x32/apps/x-remote.png

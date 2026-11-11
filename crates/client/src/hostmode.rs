@@ -4,6 +4,7 @@
 //! Linux only for the full path (needs X11 to capture and inject input). macOS uses
 //! CoreGraphics. On other platforms `start` reports "not supported".
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
@@ -220,12 +221,105 @@ pub fn set_password(pw: String) {
     *pw_slot().lock().unwrap() = Some(pw);
 }
 
-/// Saved host id (`~/.config/x-remote/host_id`). Shown at once in "Your ID",
-/// without waiting for the server — otherwise every launch sticks on
+fn end_flag() -> &'static AtomicBool {
+    static S: AtomicBool = AtomicBool::new(false);
+    &S
+}
+
+fn replace_io_flag() -> &'static AtomicBool {
+    static S: AtomicBool = AtomicBool::new(false);
+    &S
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn end_pending() -> bool {
+    end_flag().load(Ordering::SeqCst)
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn take_end() -> bool {
+    end_flag().swap(false, Ordering::SeqCst)
+}
+
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+fn take_replace_io() -> bool {
+    replace_io_flag().swap(false, Ordering::SeqCst)
+}
+
+/// The chat × on the machine row. Ends the control session.
+/// The host thread notices on its next poll and tells the controller.
+pub fn request_end_session(tt: &HostShare) {
+    end_flag().store(true, Ordering::SeqCst);
+    let mut g = tt.lock().unwrap();
+    g.serving = false;
+    g.peer_typing = false;
+    // Drop "Handshaking…" so the footer can show the line the button set.
+    g.status = "Ready — waiting for a connection".into();
+}
+
+/// Settings → grant the system permissions again after the user clicked Deny.
+///
+/// macOS shows Screen Recording and Accessibility once. After Deny the prompt
+/// does not return; this opens System Settings for each one still missing.
+/// Linux retries opening the screen and the mouse/keyboard injector.
+pub fn grant_system_access() -> (bool, bool, String) {
+    replace_io_flag().store(true, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    {
+        let screen = uvsession::capture::request_screen_record();
+        let input = uvsession::inject::request_accessibility();
+        if !screen {
+            open_macos_privacy("Privacy_ScreenCapture");
+        }
+        if !input {
+            open_macos_privacy("Privacy_Accessibility");
+        }
+        let detail = if screen && input {
+            "Đã cấp quyền ghi màn hình, chuột và bàn phím.".to_string()
+        } else {
+            "macOS không hiện lại hộp thoại sau khi bấm Từ chối. Hãy bật X-Remote trong Cài đặt hệ thống → Quyền riêng tư, rồi bấm Cấp lại quyền.".to_string()
+        };
+        return (screen, input, detail);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let screen = uvsession::capture::Capturer::new();
+        let input = uvsession::inject::InputInjector::new();
+        let detail = match (&screen, &input) {
+            (Ok(_), Ok(_)) => "Đã cấp quyền ghi màn hình, chuột và bàn phím.".to_string(),
+            (Err(e), _) => format!(
+                "Chưa ghi được màn hình: {e}. Nếu vừa bấm Từ chối, hãy cho phép rồi bấm Cấp lại quyền."
+            ),
+            (Ok(_), Err(e)) => format!(
+                "Đã ghi được màn hình. Chưa điều khiển được chuột và bàn phím: {e}. Nếu vừa bấm Từ chối, hãy cho phép rồi bấm Cấp lại quyền."
+            ),
+        };
+        return (screen.is_ok(), input.is_ok(), detail);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        replace_io_flag().store(false, Ordering::SeqCst);
+        (
+            false,
+            false,
+            "Cấp quyền hệ thống dùng trên Linux và macOS.".to_string(),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_macos_privacy(pane: &str) {
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+/// Saved or pre-registered initial host id. Shown at once in "Your ID",
+/// without waiting for the server — so even a brand-new install shows a
+/// working ID immediately on launch (like Windows) instead of sticking on
 /// "— đang đăng ký —".
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn saved_id_shown() -> Option<String> {
-    let s = uvsession::host::saved_host_id();
+    let s = uvsession::host::default_initial_id();
     (!s.is_empty()).then_some(s)
 }
 
@@ -259,11 +353,13 @@ pub fn start(password: String) -> HostShare {
         status: "Registering…".into(),
         ..Default::default()
     }));
-    let tt2 = tt.clone();
-    std::thread::Builder::new()
-        .name("uvhost".into())
-        .spawn(move || host_loop(password, tt2))
-        .ok();
+    if !cfg!(test) {
+        let tt2 = tt.clone();
+        std::thread::Builder::new()
+            .name("uvhost".into())
+            .spawn(move || host_loop(password, tt2))
+            .ok();
+    }
     tt
 }
 
@@ -294,10 +390,42 @@ pub fn start(_password: String) -> HostShare {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn host_loop(password: String, tt: HostShare) {
     let mut password = password;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+    let booted = Instant::now();
+    let saved = uvsession::host::saved_host_id();
+    let disk = uvsession::Ident::current().disk_id;
+    log_line(&format!(
+        "start app={} protocol={} saved_id={} disk={}",
+        env!("CARGO_PKG_VERSION"),
+        uvsession::VERSION,
+        if saved.is_empty() { "0" } else { saved.as_str() },
+        disk
+    ));
     use uvsession::capture::Capturer;
     use uvsession::inject::InputInjector;
     use uvsession::HostControl;
+
+    /// Settings → “Cấp lại quyền” sets the flag. Reopen capture and input on the
+    /// next pass, including while this thread is parked in the wait-for-controller loop.
+    fn reopen_io(cap: &mut Option<Capturer>, inj: &mut Option<InputInjector>) {
+        if !take_replace_io() {
+            return;
+        }
+        match Capturer::new() {
+            Ok(m) => {
+                log_line(&format!("screen reopened {}x{}", m.width, m.height));
+                *cap = Some(m);
+            }
+            Err(e) => log_line(&format!("screen reopen failed: {e}")),
+        }
+        match InputInjector::new() {
+            Ok(m) => {
+                log_line("input injector reopened");
+                *inj = Some(m);
+            }
+            Err(e) => log_line(&format!("input reopen failed: {e}")),
+        }
+    }
 
     let set_status = |s: &str| {
         log_line(s);
@@ -327,26 +455,37 @@ fn host_loop(password: String, tt: HostShare) {
         }
     }
 
+    // Linux host mode reads the X11 root window and injects with XTEST. Under a
+    // Wayland session that is XWayland: the controller sees a black/empty screen
+    // and clicks only reach X11 apps. Say so instead of serving a blank picture.
+    #[cfg(target_os = "linux")]
+    if std::env::var("XDG_SESSION_TYPE").is_ok_and(|s| s.eq_ignore_ascii_case("wayland")) {
+        log_line("Wayland session: X11 capture sees only XWayland windows");
+        tt.lock().unwrap().alert = Some(
+            "Phiên Wayland: máy điều khiển sẽ chỉ thấy màn hình đen. Hãy đăng xuất và chọn phiên X11 (Xorg) để được điều khiển.".into(),
+        );
+    }
+
     // Capture + input injection open once and are reused for every session.
-    let cap = match Capturer::new() {
-        Ok(m) => m,
+    // Do not block UltraViewer ID registration if the display server is not ready yet.
+    let mut cap = match Capturer::new() {
+        Ok(m) => {
+            log_line(&format!("screen {}x{}", m.width, m.height));
+            Some(m)
+        }
         Err(e) => {
-            set_status(&format!("Could not open the screen: {e}"));
-            return;
+            log_line(&format!("screen open deferred until session: {e}"));
+            None
         }
     };
-    let inj = InputInjector::new().ok();
-    log_line(&format!("screen {}x{}", cap.width, cap.height));
-    // Back off on errors so login is not hammered. Transient network: 5 → 10 → … → 300 seconds.
-    // Command `60:` is captcha (enter_captcha.aspx), not silence. macOS/Linux opens a window
-    // for the user to type the code, then resubmits at once. Closing the window, or two
-    // tries used up, waits 10 → 30 minutes so the challenge does not stay hot.
+    let mut inj = InputInjector::new().ok();
+    // Back off so login is not hammered: 5 → 10 → … → 300 seconds.
     let mut retry_s: u64 = 5;
-    let mut id_blocked = false;
     let mut token_captcha = String::new();
     let mut captcha_wins: u32 = 0;
 
     loop {
+        reopen_io(&mut cap, &mut inj);
         // UI asked for a new password → register again with it.
         if let Some(p) = pw_slot().lock().unwrap().take() {
             password = p;
@@ -366,6 +505,12 @@ fn host_loop(password: String, tt: HostShare) {
         if let Some(l) = &listener {
             let _ = l.set_nonblocking(true);
         }
+        log_line(&format!(
+            "login begin +{}s prefer={} lan={lan} listen={listen_port} pw_chars={}",
+            booted.elapsed().as_secs(),
+            if pref.is_empty() { "0" } else { pref.as_str() },
+            password.len()
+        ));
         let token = std::mem::take(&mut token_captcha);
         match HostControl::register(&pref, &password, &lan, listen_port, &token, Duration::from_secs(15)) {
             Ok(mut h) => {
@@ -379,9 +524,10 @@ fn host_loop(password: String, tt: HostShare) {
                 // field stays on "— đang đăng ký —".
                 wake_ui();
                 log_line(&format!(
-                    "registered: ID {} (requested {}) password {} chars, LAN {lan}, P2P port {}",
+                    "registered: ID {} (requested {}) after {}s password {} chars, LAN {lan}, P2P port {}",
                     h.assigned_id,
                     if pref.is_empty() { "0" } else { &pref },
+                    booted.elapsed().as_secs(),
                     password.len(),
                     h.p2p_port
                 ));
@@ -389,9 +535,12 @@ fn host_loop(password: String, tt: HostShare) {
                 // straight to `LAN_IP:port` (docs/03 §19). No listen → the controller times out.
                 log_line(&format!("listen 0.0.0.0:{listen_port} + advertised in login"));
                 retry_s = 5;
-                id_blocked = false;
+                captcha_wins = 0;
+                // One reply per session. Repeating it is what makes the server ask for captcha.
+                let mut replied_sid = String::new();
                 // Wait for a controller to dial.
                 loop {
+                    reopen_io(&mut cap, &mut inj);
                     if pw_slot().lock().unwrap().is_some() {
                         break;
                     }
@@ -421,13 +570,17 @@ fn host_loop(password: String, tt: HostShare) {
                                 log_line("empty cmd17 — re-register to reset the session");
                                 break;
                             }
-                            // 1) Answer command 17 on the control channel so the server
-                            //    hands our address to the controller.
+                            if cmd17.session_id == replied_sid {
+                                log_line("skip repeated reply for the same session");
+                                continue;
+                            }
+                            // Answer command 17 once so the server hands our address to the controller.
                             let pub_ip = h.public_ip.clone();
                             match cmd17.reply_17(h.control_mut(), &pub_ip, listen_port, &lan, listen_port) {
                                 Ok(s) => log_line(&format!("reply 17 (control): {s}")),
                                 Err(e) => log_line(&format!("reply 17 failed: {e}")),
                             }
+                            replied_sid = cmd17.session_id.clone();
                             // 2) Reach the controller: wait for it to dial our listen port (a real
                             //    UltraViewer controller does that) AND at the same time dial the LAN
                             //    address it published (an X-Remote controller waits for the host to
@@ -437,6 +590,16 @@ fn host_loop(password: String, tt: HostShare) {
                             let sock = listener
                                 .as_ref()
                                 .and_then(|l| wait_accept(l, cmd17.controller_lan.clone(), 25));
+                            if end_pending() {
+                                let _ = take_end();
+                                log_line("user ended the connection");
+                                let mut g = tt.lock().unwrap();
+                                g.serving = false;
+                                g.peer_typing = false;
+                                g.status = "Ready — waiting for a connection".into();
+                                wake_ui();
+                                continue;
+                            }
                             let kq = match sock {
                                 Some((s, cach)) => {
                                     log_line(&format!("controller connected ({cach})"));
@@ -444,42 +607,84 @@ fn host_loop(password: String, tt: HostShare) {
                                 }
                                 None => {
                                     log_line("nobody dialed — trying relay");
-                                    cmd17.connect_controller(h.control_mut(), 0, Duration::from_secs(6))
+                                    // Already answered command 17 once, with the listen port.
+                                    // Do not answer again: a second reply replaces that
+                                    // port and is what makes the server ask for captcha.
+                                    cmd17.connect_controller(
+                                        h.control_mut(),
+                                        0,
+                                        Duration::from_secs(6),
+                                        false,
+                                        || end_pending(),
+                                    )
                                 }
                             };
+                            let mut ended = false;
                             match kq {
                                 Ok(mut hs) => {
-                                    log_line(&format!("SESSION CHANNEL OPEN: {}", hs.peer));
-                                    log_line(&format!("session login: {}", hs.controller_login));
-                                    {
-                                        let mut g = tt.lock().unwrap();
-                                        g.status = "Being controlled".into();
-                                        g.peer_name = name_from_login(&hs.controller_login);
+                                    if end_pending() {
+                                        ended = true;
+                                        log_line("user ended the connection");
+                                        let _ = hs.session.send(uvsession::client::BREAK_ERR);
+                                    } else {
+                                        log_line(&format!("SESSION CHANNEL OPEN: {}", hs.peer));
+                                        log_line(&format!("session login: {}", hs.controller_login));
+                                        if cap.is_none() {
+                                            match Capturer::new() {
+                                                Ok(m) => {
+                                                    log_line(&format!("screen {}x{}", m.width, m.height));
+                                                    cap = Some(m);
+                                                }
+                                                Err(e) => {
+                                                    log_line(&format!("screen open failed: {e}"));
+                                                    set_status(&format!("Could not open the screen: {e}"));
+                                                }
+                                            }
+                                        }
+                                        if inj.is_none() {
+                                            inj = InputInjector::new().ok();
+                                        }
+                                        if let Some(cap_ref) = cap.as_ref() {
+                                            {
+                                                let mut g = tt.lock().unwrap();
+                                                g.status = "Being controlled".into();
+                                                g.peer_name = name_from_login(&hs.controller_login);
+                                            }
+                                            wake_ui();
+                                            outbox().lock().unwrap().clear();
+                                            let mut chat = UiChat { tt: tt.clone() };
+                                            let kq = uvsession::hostrun::serve_session_chat(
+                                                &mut hs, cap_ref, inj.as_ref(), take_end, |_| {}, &mut chat,
+                                            );
+                                            // The peer (Mac/Linux) can close mid-session and leave a
+                                            // modifier or mouse button down. Release them, or this
+                                            // machine cannot type into the id and password fields.
+                                            if let Some(b) = inj.as_ref() {
+                                                uvsession::inject::release_all(b);
+                                            }
+                                            log_line(&format!("session ended: {kq:?}"));
+                                        }
                                     }
-                                    wake_ui();
-                                    outbox().lock().unwrap().clear();
-                                    let mut chat = UiChat { tt: tt.clone() };
-                                    let kq = uvsession::hostrun::serve_session_chat(
-                                        &mut hs, &cap, inj.as_ref(), || false, |_| {}, &mut chat,
-                                    );
-                                    // The peer (Mac/Linux) can close mid-session and leave a
-                                    // modifier or mouse button down. Release them, or this
-                                    // machine cannot type into the id and password fields.
-                                    if let Some(b) = inj.as_ref() {
-                                        uvsession::inject::release_all(b);
-                                    }
-                                    log_line(&format!("session ended: {kq:?}"));
                                 }
                                 Err(e) => {
-                                    log_line(&format!("CONTROLLER CONNECT FAILED: {e}"));
-                                    set_status(&format!("Controller connect failed: {e}"));
+                                    if end_pending() || e == "ended by user" {
+                                        ended = true;
+                                        log_line("user ended the connection");
+                                    } else {
+                                        log_line(&format!("CONTROLLER CONNECT FAILED: {e}"));
+                                        set_status(&format!("Controller connect failed: {e}"));
+                                    }
                                 }
+                            }
+                            // A click during the relay wait must not cancel the next session.
+                            if take_end() {
+                                ended = true;
                             }
                             {
                                 let mut g = tt.lock().unwrap();
                                 g.serving = false;
                                 g.peer_typing = false;
-                                if !g.status.starts_with("Controller connect failed") {
+                                if ended || !g.status.starts_with("Controller connect failed") {
                                     g.status = "Ready — waiting for a connection".into();
                                 }
                             }
@@ -501,71 +706,23 @@ fn host_loop(password: String, tt: HostShare) {
                         captcha_wins += 1;
                         match uvsession::host::open_captcha(&url) {
                             Ok(Some(tok)) => {
-                                log_line("got confirmation code — resending registration");
-                                set_status("Sending the confirmation code…");
+                                log_line("got confirmation code — resending login");
                                 token_captcha = tok;
+                                retry_s = 1;
                                 continue;
                             }
-                            Ok(None) => {
-                                id_blocked = true;
-                                if retry_s < 600 {
-                                    retry_s = 600;
-                                }
-                                let mins = retry_s.div_ceil(60);
-                                set_status(&format!("Code not entered — retrying in {mins} min"));
-                                log_line(&format!("captcha closed with no code — retry in {retry_s}s"));
-                            }
-                            Err(loi) => {
-                                id_blocked = true;
-                                if retry_s < 600 {
-                                    retry_s = 600;
-                                }
-                                let mins = retry_s.div_ceil(60);
-                                log_line(&format!("could not open captcha: {loi}"));
-                                set_status(&format!(
-                                    "Could not open the confirmation window — retrying in {mins} min"
-                                ));
-                            }
+                            Ok(None) => log_line("captcha window closed without a code"),
+                            Err(err) => log_line(&format!("open captcha failed: {err}")),
                         }
-                    } else {
-                        id_blocked = true;
-                        if retry_s < 600 {
-                            retry_s = 600;
-                        }
-                        let mins = retry_s.div_ceil(60);
-                        log_line(&format!(
-                            "captcha — wait {retry_s}s (opened {captcha_wins} windows)"
-                        ));
-                        set_status(&format!("Server requires a confirmation code — retrying in {mins} min"));
-                    }
-                } else {
-                    // A leftover `(60)` is captcha whose session code could not be read.
-                    // Real silence backs off on the short ladder.
-                    id_blocked = e.contains("(60)") || e.contains("chặn cấp ID");
-                    if id_blocked && retry_s < 600 {
-                        retry_s = 600;
-                    }
-                    log_line(&format!("register failed: {e} — retry in {retry_s}s"));
-                    if id_blocked {
-                        set_status(&format!(
-                            "Server is not issuing a new ID yet — retrying in {} min",
-                            retry_s.div_ceil(60)
-                        ));
-                    } else {
-                        set_status("Reconnecting to the server…");
                     }
                 }
+                log_line(&format!("register failed: {e} — retry in {retry_s}s"));
+                set_status("Reconnecting to the server…");
             }
         }
         std::thread::sleep(Duration::from_secs(retry_s));
-        captcha_wins = 0;
-        // Hammering retries only makes the server keep the challenge longer. Unsolved
-        // captcha: stretch up to 30 minutes; other errors (network/silence): 5 → 10 → … → 5 minutes.
-        retry_s = if id_blocked {
-            (retry_s * 2).min(1800)
-        } else {
-            (retry_s * 2).min(300)
-        };
+        // 5 → 10 → … → 5 minutes. Do not hammer login.
+        retry_s = (retry_s * 2).min(300);
     }
 }
 
@@ -584,6 +741,9 @@ fn wait_accept(
     let deadline = Instant::now() + Duration::from_secs(secs);
     let mut next_dial = Instant::now();
     while Instant::now() < deadline {
+        if end_pending() {
+            return None;
+        }
         match l.accept() {
             Ok((s, _)) => {
                 let _ = s.set_nonblocking(false);
@@ -608,28 +768,7 @@ fn wait_accept(
 /// Append a diagnostic line to `~/.config/x-remote/host.log` (Windows: `%APPDATA%`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn log_line(s: &str) {
-    use std::io::Write;
-    let Some(p) = log_path() else { return };
-    if let Some(d) = p.parent() {
-        let _ = std::fs::create_dir_all(d);
-    }
-    let moc = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-        let _ = writeln!(f, "[{moc}] {s}");
-    }
+    uvsession::diag::event(s);
 }
 
-/// Path of the host log file.
-#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))] // host mode only (Linux, macOS)
-pub fn log_path() -> Option<std::path::PathBuf> {
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-    if cfg!(windows) {
-        return env("APPDATA").map(|d| d.join("X-Remote").join("host.log"));
-    }
-    env("XDG_CONFIG_HOME")
-        .or_else(|| env("HOME").map(|h| h.join(".config")))
-        .map(|d| d.join("x-remote").join("host.log"))
-}
+

@@ -30,3 +30,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Flatpak build state
+/packaging/flatpak/build
+/packaging/flatpak/.flatpak-builder
