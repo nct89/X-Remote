@@ -1,99 +1,188 @@
 # X-Remote
 
-X-Remote là ứng dụng giúp bạn **kết nối và điều khiển máy tính Windows đang chạy UltraViewer** một cách dễ dàng ngay từ **macOS** và **Linux**.
+X-Remote giúp bạn **điều khiển máy tính Windows đang chạy UltraViewer** ngay từ **Linux** hoặc **macOS**, và cho phép người khác điều khiển lại máy của bạn.
 
-Chỉ cần nhập **ID** và **mật khẩu** hiển thị trên máy Windows là bạn có thể xem màn hình và thao tác từ xa ngay lập tức.
+Chỉ cần nhập **ID** và **mật khẩu** hiển thị trên máy cần điều khiển là bạn xem được màn hình và dùng chuột, bàn phím từ xa.
 
 ## Tính năng
 
-- Kết nối nhanh bằng ID và mật khẩu UltraViewer
-- Xem màn hình từ xa mượt mà, hỗ trợ nhiều màn hình
-- Điều khiển chuột và bàn phím từ xa
-- Trò chuyện (chat) trong phiên làm việc
-- Tùy chỉnh chất lượng hình ảnh: tốc độ / tự động / nét
-- Cho phép máy khác điều khiển ngược lại máy của bạn (chế độ bị điều khiển)
+- Kết nối bằng ID và mật khẩu UltraViewer, không cần cài gì thêm lên máy Windows
+- Xem màn hình từ xa, chọn từng màn hình khi máy kia có nhiều màn hình
+- Điều khiển chuột, bàn phím, gửi Ctrl+Alt+Del và các phím tắt hệ thống
+- Chat, gửi tệp, ảnh và đường dẫn thư mục trong phiên làm việc
+- Chọn chất lượng hình: Thấp (nhẹ mạng), Vừa, Cao (nét)
+- Chụp ảnh màn hình máy đang điều khiển
+- Cho phép người khác điều khiển máy của bạn (trên Linux xem giới hạn ở mục [Người điều khiển máy tôi chỉ thấy màn hình đen](#người-điều-khiển-máy-tôi-chỉ-thấy-màn-hình-đen))
 
-## Tải xuống
+## Chọn gói cài
 
-Tải bản mới nhất tại [trang Releases](https://github.com/nct89/X-Remote/releases/latest).
+Tải gói tại [trang Releases](https://github.com/nct89/X-Remote/releases/latest). Chọn **một** gói theo hệ điều hành của bạn:
 
-| Nền tảng | Tệp |
+| Hệ điều hành | Tải tệp |
 |---|---|
-| macOS | `X-Remote-0.1.0-macos-universal.dmg` |
-| Linux | `X-Remote-x86_64.AppImage` |
-| Linux | `x-remote_0.1.3_amd64.deb` |
-| Linux | `x-remote-0.1.3-1.x86_64.rpm` |
-| Linux | `x-remote-0.1.3-linux-x86_64.tar.gz` |
+| Ubuntu 22.04 trở lên, Debian 11 trở lên, Linux Mint 21+, Pop!_OS, Zorin | `x-remote_0.1.4_amd64.deb` |
+| Fedora, RHEL / Rocky Linux / AlmaLinux 9 trở lên | `x-remote-0.1.4-1.x86_64.rpm` |
+| openSUSE Leap 15.6, Tumbleweed | `x-remote-0.1.4-1.x86_64.rpm` |
+| Bản Linux bất kỳ có Flatpak | `X-Remote.flatpak` |
+| Bản Linux bất kỳ, không muốn cài vào hệ thống | `X-Remote-x86_64.AppImage` |
+| Bản Linux bất kỳ, cài vào thư mục người dùng | `x-remote-0.1.4-linux-x86_64.tar.gz` |
+| macOS 11 trở lên (Intel và Apple Silicon) | `X-Remote-0.1.0-macos-universal.dmg` |
 
-Gói Linux cần glibc 2.35 trở lên (Ubuntu 22.04, 24.04, 26.04 và các bản tương đương).
+**Nên chọn `.deb`, `.rpm` hoặc Flatpak:** các gói này tự cài luôn những thành phần đi kèm (thư viện đồ hoạ, cửa sổ xác nhận captcha). AppImage và tar.gz có thể cần cài thêm, xem [Cửa sổ xác nhận (captcha) không mở](#cửa-sổ-xác-nhận-captcha-không-mở).
+
+Gói Linux đã được cài thử trên Ubuntu 22.04, Debian 11, Rocky Linux 9, openSUSE Leap 15.6 và Fedora 44. Máy cần Linux 64-bit (x86_64). Bản Linux cũ hơn danh sách trên thì dùng Flatpak.
 
 ## Cài đặt
 
-### macOS (macOS 11 Big Sur trở lên)
+Mở **Terminal** trong thư mục chứa tệp vừa tải (thường là `~/Downloads`; chuột phải trong thư mục → *Open in Terminal*), rồi chạy lệnh tương ứng.
 
-1. Tải file `X-Remote-0.1.0-macos-universal.dmg`.
-2. Mở file và kéo **X-Remote** vào thư mục **Applications**.
-3. Lần đầu mở: nhấp chuột phải vào ứng dụng → chọn **Open** → chọn **Open** lần nữa để xác nhận.
+### Ubuntu / Debian / Linux Mint / Pop!_OS
 
-### Linux
+```sh
+sudo apt install ./x-remote_0.1.4_amd64.deb
+```
 
-#### AppImage — mọi bản phân phối có glibc 2.35 trở lên, không cần quyền root
+Hoặc nhấp đúp tệp `.deb` để cài bằng trình quản lý phần mềm.
+
+### Fedora / RHEL / Rocky Linux / AlmaLinux
+
+```sh
+sudo dnf install ./x-remote-0.1.4-1.x86_64.rpm
+```
+
+### openSUSE
+
+```sh
+sudo zypper install --allow-unsigned-rpm ./x-remote-0.1.4-1.x86_64.rpm
+```
+
+Gói chưa được ký số nên cần thêm `--allow-unsigned-rpm`.
+
+### Flatpak
+
+```sh
+flatpak install --user ./X-Remote.flatpak
+flatpak run net.xremote.app
+```
+
+Máy chưa có Flatpak thì cài theo hướng dẫn tại [flatpak.org/setup](https://flatpak.org/setup/). Lần cài đầu, Flatpak tải thêm bộ thư viện GNOME (vài trăm MB).
+
+### AppImage (không cần quyền root)
 
 ```sh
 chmod +x X-Remote-x86_64.AppImage
 ./X-Remote-x86_64.AppImage
 ```
 
-#### Debian / Ubuntu 22.04+ / Linux Mint / Pop!_OS
+### Tarball (cài vào `~/.local`, không cần quyền root)
 
 ```sh
-sudo apt install ./x-remote_0.1.3_amd64.deb
+tar xf x-remote-0.1.4-linux-x86_64.tar.gz
+./x-remote-0.1.4-linux-x86_64/install.sh
 ```
 
-#### Fedora / RHEL / Rocky Linux / AlmaLinux
-
-```sh
-sudo dnf install ./x-remote-0.1.3-1.x86_64.rpm
-```
-
-#### Tarball di động — cài vào `~/.local`, không cần quyền root
-
-```sh
-tar xf x-remote-0.1.3-linux-x86_64.tar.gz
-./x-remote-0.1.3-linux-x86_64/install.sh
-```
-
-Sau đó chạy lệnh `x-remote` (thêm `~/.local/bin` vào `PATH` nếu cần).
-
-## Sử dụng
-
-1. Trên máy Windows, mở UltraViewer và ghi lại **ID của bạn** cùng **mật khẩu**.
-2. Mở X-Remote, nhập ID và mật khẩu đó vào khung kết nối.
-3. Nhấn **Bắt đầu điều khiển**.
-
-Để cho máy khác điều khiển máy của bạn, chia sẻ ID và mật khẩu hiển thị ở khung **Cho phép điều khiển**.
-
-## Gỡ cài đặt
+Sau khi cài, mở **X-Remote** từ menu ứng dụng hoặc chạy lệnh `x-remote`. Nếu báo không tìm thấy lệnh, thêm `~/.local/bin` vào `PATH`.
 
 ### macOS
 
+1. Mở tệp `X-Remote-0.1.0-macos-universal.dmg`, kéo **X-Remote** vào thư mục **Applications**.
+2. Lần đầu mở: chuột phải vào ứng dụng → **Open** → **Open** lần nữa để xác nhận.
+3. Để người khác điều khiển được máy Mac, vào **Cài đặt hệ thống → Quyền riêng tư & Bảo mật**, bật **Ghi màn hình** và **Trợ năng** cho X-Remote.
+
+## Sử dụng
+
+### Lần đầu mở ứng dụng
+
+X-Remote tự xin một **ID của bạn** từ máy chủ UltraViewer. Đôi khi máy chủ yêu cầu xác nhận: một cửa sổ nhỏ hiện ảnh chữ, bạn gõ đúng chữ trong ảnh rồi xác nhận. Việc này chỉ cần làm một lần; các lần sau ID được giữ nguyên.
+
+### Điều khiển một máy khác
+
+1. Trên máy cần điều khiển, mở UltraViewer (hoặc X-Remote) và đọc **ID** cùng **mật khẩu**.
+2. Trong X-Remote, ở khung **Điều khiển máy tính khác**, nhập **ID đối tác** và **Mật khẩu**.
+3. Bấm **Bắt đầu điều khiển**.
+
+Thanh công cụ ở mép trên màn hình phiên:
+
+| Nút | Dùng để |
+|---|---|
+| **Thao tác** | Gửi Ctrl+Alt+Del, các phím tắt hệ thống, **Ngắt kết nối** |
+| **Cấu hình** | Chất lượng hình, chọn màn hình, ẩn hình nền máy đích, **Toàn màn hình** |
+| **Chụp hình** | Lưu ảnh màn hình máy đích vào `~/Pictures/X-Remote`, mở thư mục ảnh |
+| **Chat** | Mở khung chat: nhắn tin, gửi tệp, ảnh, đường dẫn thư mục |
+| **⌃** | Thu gọn thanh công cụ |
+
+### Cho người khác điều khiển máy của bạn
+
+Gửi cho người hỗ trợ **ID của bạn** và **Mật khẩu** trong khung **Cho phép điều khiển**. Xong việc, bấm nút làm mới cạnh mật khẩu để đổi mật khẩu. Muốn ngắt phiên ngay, bấm **×** trên dòng tên máy trong khung chat.
+
+Trên Linux, chế độ này hiện chỉ chạy trên phiên **X11** — xem [Người điều khiển máy tôi chỉ thấy màn hình đen](#người-điều-khiển-máy-tôi-chỉ-thấy-màn-hình-đen).
+
+### Gõ tiếng Việt khi điều khiển
+
+X-Remote gửi phím thật sang máy kia. Hãy gõ tiếng Việt bằng bộ gõ (Unikey, EVKey…) **trên máy được điều khiển**. Nếu máy của bạn dùng fcitx5, X-Remote tự kết nối để bạn vẫn gõ tiếng Việt được trong khung chat và ô nhập ID.
+
+## Khắc phục sự cố
+
+### Cửa sổ đứng hình, nền đen, báo "X-Remote is not responding"
+
+Lỗi xảy ra ở bản 0.1.3 trở về trước, khi bạn **điều khiển máy khác** từ Linux chạy Wayland (KDE Plasma, GNOME), nhất là lúc bật toàn màn hình. **Đã sửa từ bản 0.1.4** — hãy cài bản mới nhất. Nếu vẫn gặp, hãy báo lại kèm tên bản Linux và môi trường desktop đang dùng.
+
+### Người điều khiển máy tôi chỉ thấy màn hình đen
+
+Đây là trường hợp **người khác điều khiển máy Linux của bạn** trong khi máy bạn chạy **Wayland** (mặc định trên Fedora, Ubuntu 22.04 trở lên, KDE Plasma 6). Bản 0.1.4 chỉ chụp được màn hình trên phiên **X11**, nên trên Wayland phía bên kia chỉ thấy màn hình đen. Hỗ trợ Wayland đang được làm cho bản tiếp theo.
+
+Trong lúc chờ:
+- Kiểm tra máy đang chạy phiên nào: mở Terminal, gõ `echo $XDG_SESSION_TYPE` (kết quả là `x11` hoặc `wayland`).
+- Nếu màn hình đăng nhập có lựa chọn phiên **X11 / Xorg** (ví dụ "Ubuntu on Xorg", "Plasma (X11)"), đăng xuất và chọn phiên đó trước khi cho người khác điều khiển.
+
+Việc **bạn điều khiển máy khác** không bị ảnh hưởng: trên Wayland bạn vẫn điều khiển máy Windows bình thường.
+
+### Cửa sổ xác nhận (captcha) không mở
+
+Gói `.deb`, `.rpm` và Flatpak đã kèm sẵn thành phần này. Với AppImage hoặc tar.gz, cài thêm:
+
 ```sh
-rm -rf /Applications/X-Remote.app
+# Ubuntu / Debian / Mint
+sudo apt install gir1.2-webkit2-4.1 python3-gi
+# Fedora / RHEL / Rocky
+sudo dnf install webkit2gtk4.1 python3-gobject
+# openSUSE
+sudo zypper install typelib-1_0-WebKit2-4_1 python3-gobject-Gdk
 ```
 
-### Linux
+### Báo lỗi `GLIBC_2.xx not found` hoặc không cài được gói
+
+Bản Linux đang dùng cũ hơn danh sách đã hỗ trợ. Hãy dùng gói **Flatpak**, hoặc nâng cấp hệ điều hành.
+
+### Không kết nối được hoặc báo sai mật khẩu
+
+- Kiểm tra lại ID và mật khẩu (mật khẩu UltraViewer có thể đổi mỗi lần mở lại).
+- Máy kia phải đang mở UltraViewer/X-Remote và có Internet.
+- Mạng công ty hoặc tường lửa có thể chặn kết nối; thử mạng khác.
+
+### Nhật ký gửi kèm khi báo lỗi
+
+`~/.config/x-remote/host.log` (bản Flatpak: `~/.var/app/net.xremote.app/config/x-remote/host.log`). Tệp này không chứa mật khẩu.
+
+## Gỡ cài đặt
 
 ```sh
 # .deb
 sudo apt remove x-remote
-
-# .rpm
+# .rpm (Fedora / RHEL)
 sudo dnf remove x-remote
-
-# bản di động (portable)
+# .rpm (openSUSE)
+sudo zypper remove x-remote
+# Flatpak
+flatpak uninstall --user net.xremote.app
+# tarball
 rm -rf ~/.local/share/x-remote ~/.local/bin/x-remote \
        ~/.local/share/applications/x-remote.desktop
 ```
+
+AppImage: chỉ cần xoá tệp `.AppImage`. macOS: kéo **X-Remote** trong **Applications** vào Thùng rác.
+
+ID và cấu hình nằm trong `~/.config/x-remote`; xoá thư mục này nếu muốn xoá hẳn.
 
 ## Giấy phép
 
