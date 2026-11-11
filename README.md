@@ -12,7 +12,7 @@ Chỉ cần nhập **ID** và **mật khẩu** hiển thị trên máy cần đi
 - Chat, gửi tệp, ảnh và đường dẫn thư mục trong phiên làm việc
 - Chọn chất lượng hình: Thấp (nhẹ mạng), Vừa, Cao (nét)
 - Chụp ảnh màn hình máy đang điều khiển
-- Cho phép người khác điều khiển máy của bạn (trên Linux xem giới hạn ở mục [Người điều khiển máy tôi chỉ thấy màn hình đen](#người-điều-khiển-máy-tôi-chỉ-thấy-màn-hình-đen))
+- Cho phép người khác điều khiển máy của bạn, trên cả X11 và Wayland (GNOME, KDE Plasma)
 
 ## Chọn gói cài
 
@@ -20,17 +20,17 @@ Tải gói tại [trang Releases](https://github.com/nct89/X-Remote/releases/lat
 
 | Hệ điều hành | Tải tệp |
 |---|---|
-| Ubuntu 22.04 trở lên, Debian 11 trở lên, Linux Mint 21+, Pop!_OS, Zorin | `x-remote_0.1.4_amd64.deb` |
-| Fedora, RHEL / Rocky Linux / AlmaLinux 9 trở lên | `x-remote-0.1.4-1.x86_64.rpm` |
-| openSUSE Leap 15.6, Tumbleweed | `x-remote-0.1.4-1.x86_64.rpm` |
+| Ubuntu 22.04 trở lên, Debian 12 trở lên, Linux Mint 21+, Pop!_OS, Zorin | `x-remote_0.1.5_amd64.deb` |
+| Fedora, RHEL / Rocky Linux / AlmaLinux 9 trở lên | `x-remote-0.1.5-1.x86_64.rpm` |
+| openSUSE Leap 15.6, Tumbleweed | `x-remote-0.1.5-1.x86_64.rpm` |
 | Bản Linux bất kỳ có Flatpak | `X-Remote.flatpak` |
 | Bản Linux bất kỳ, không muốn cài vào hệ thống | `X-Remote-x86_64.AppImage` |
-| Bản Linux bất kỳ, cài vào thư mục người dùng | `x-remote-0.1.4-linux-x86_64.tar.gz` |
+| Bản Linux bất kỳ, cài vào thư mục người dùng | `x-remote-0.1.5-linux-x86_64.tar.gz` |
 | macOS 11 trở lên (Intel và Apple Silicon) | `X-Remote-0.1.0-macos-universal.dmg` |
 
-**Nên chọn `.deb`, `.rpm` hoặc Flatpak:** các gói này tự cài luôn những thành phần đi kèm (thư viện đồ hoạ, cửa sổ xác nhận captcha). AppImage và tar.gz có thể cần cài thêm, xem [Cửa sổ xác nhận (captcha) không mở](#cửa-sổ-xác-nhận-captcha-không-mở).
+**Nên chọn `.deb`, `.rpm` hoặc Flatpak:** các gói này tự cài luôn những thành phần đi kèm (thư viện đồ hoạ, cửa sổ xác nhận captcha, thành phần chia sẻ màn hình trên Wayland). AppImage và tar.gz có thể cần cài thêm, xem [Cửa sổ xác nhận (captcha) không mở](#cửa-sổ-xác-nhận-captcha-không-mở).
 
-Gói Linux đã được cài thử trên Ubuntu 22.04, Debian 11, Rocky Linux 9, openSUSE Leap 15.6 và Fedora 44. Máy cần Linux 64-bit (x86_64). Bản Linux cũ hơn danh sách trên thì dùng Flatpak.
+Gói Linux đã được cài thử trên Ubuntu 22.04, Ubuntu 24.04, Rocky Linux 9, openSUSE Leap 15.6 và Fedora 44. Máy cần Linux 64-bit (x86_64). Bản Linux cũ hơn danh sách trên thì dùng Flatpak.
 
 ## Cài đặt
 
@@ -39,7 +39,7 @@ Mở **Terminal** trong thư mục chứa tệp vừa tải (thường là `~/Do
 ### Ubuntu / Debian / Linux Mint / Pop!_OS
 
 ```sh
-sudo apt install ./x-remote_0.1.4_amd64.deb
+sudo apt install ./x-remote_0.1.5_amd64.deb
 ```
 
 Hoặc nhấp đúp tệp `.deb` để cài bằng trình quản lý phần mềm.
@@ -47,13 +47,13 @@ Hoặc nhấp đúp tệp `.deb` để cài bằng trình quản lý phần mề
 ### Fedora / RHEL / Rocky Linux / AlmaLinux
 
 ```sh
-sudo dnf install ./x-remote-0.1.4-1.x86_64.rpm
+sudo dnf install ./x-remote-0.1.5-1.x86_64.rpm
 ```
 
 ### openSUSE
 
 ```sh
-sudo zypper install --allow-unsigned-rpm ./x-remote-0.1.4-1.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./x-remote-0.1.5-1.x86_64.rpm
 ```
 
 Gói chưa được ký số nên cần thêm `--allow-unsigned-rpm`.
@@ -77,8 +77,8 @@ chmod +x X-Remote-x86_64.AppImage
 ### Tarball (cài vào `~/.local`, không cần quyền root)
 
 ```sh
-tar xf x-remote-0.1.4-linux-x86_64.tar.gz
-./x-remote-0.1.4-linux-x86_64/install.sh
+tar xf x-remote-0.1.5-linux-x86_64.tar.gz
+./x-remote-0.1.5-linux-x86_64/install.sh
 ```
 
 Sau khi cài, mở **X-Remote** từ menu ứng dụng hoặc chạy lệnh `x-remote`. Nếu báo không tìm thấy lệnh, thêm `~/.local/bin` vào `PATH`.
@@ -115,7 +115,7 @@ Thanh công cụ ở mép trên màn hình phiên:
 
 Gửi cho người hỗ trợ **ID của bạn** và **Mật khẩu** trong khung **Cho phép điều khiển**. Xong việc, bấm nút làm mới cạnh mật khẩu để đổi mật khẩu. Muốn ngắt phiên ngay, bấm **×** trên dòng tên máy trong khung chat.
 
-Trên Linux, chế độ này hiện chỉ chạy trên phiên **X11** — xem [Người điều khiển máy tôi chỉ thấy màn hình đen](#người-điều-khiển-máy-tôi-chỉ-thấy-màn-hình-đen).
+**Trên Linux dùng Wayland** (mặc định trên Fedora, Ubuntu mới, KDE Plasma 6): lần đầu có người kết nối, hệ thống hiện hộp thoại chia sẻ màn hình. Chọn màn hình, bật **cho phép điều khiển** rồi bấm **Chia sẻ**. X-Remote nhớ lựa chọn này nên các lần sau không hỏi lại.
 
 ### Gõ tiếng Việt khi điều khiển
 
@@ -129,17 +129,29 @@ Lỗi xảy ra ở bản 0.1.3 trở về trước, khi bạn **điều khiển 
 
 ### Người điều khiển máy tôi chỉ thấy màn hình đen
 
-Đây là trường hợp **người khác điều khiển máy Linux của bạn** trong khi máy bạn chạy **Wayland** (mặc định trên Fedora, Ubuntu 22.04 trở lên, KDE Plasma 6). Bản 0.1.4 chỉ chụp được màn hình trên phiên **X11**, nên trên Wayland phía bên kia chỉ thấy màn hình đen. Hỗ trợ Wayland đang được làm cho bản tiếp theo.
+Trường hợp **người khác điều khiển máy Linux của bạn**:
 
-Trong lúc chờ:
+- **Đang dùng bản 0.1.4 trở về trước trên Wayland:** các bản này chưa hỗ trợ Wayland. Hãy cài bản 0.1.5 trở lên.
+- **Đã bấm Huỷ ở hộp thoại chia sẻ màn hình:** ngắt kết nối, cho người kia kết nối lại rồi bấm **Chia sẻ**.
+- **Hộp thoại chia sẻ màn hình không hiện:** máy thiếu thành phần chia sẻ màn hình. Cài thêm rồi đăng xuất, đăng nhập lại:
+
+```sh
+# Ubuntu / Debian / Mint
+sudo apt install xdg-desktop-portal pipewire
+# Fedora / RHEL / Rocky
+sudo dnf install xdg-desktop-portal pipewire
+# openSUSE
+sudo zypper install xdg-desktop-portal pipewire
+```
+
+  Trên GNOME cần thêm gói `xdg-desktop-portal-gnome`, trên KDE là `xdg-desktop-portal-kde` (thường đã có sẵn).
 - Kiểm tra máy đang chạy phiên nào: mở Terminal, gõ `echo $XDG_SESSION_TYPE` (kết quả là `x11` hoặc `wayland`).
-- Nếu màn hình đăng nhập có lựa chọn phiên **X11 / Xorg** (ví dụ "Ubuntu on Xorg", "Plasma (X11)"), đăng xuất và chọn phiên đó trước khi cho người khác điều khiển.
 
-Việc **bạn điều khiển máy khác** không bị ảnh hưởng: trên Wayland bạn vẫn điều khiển máy Windows bình thường.
+Việc **bạn điều khiển máy khác** không bị ảnh hưởng bởi các mục trên.
 
 ### Cửa sổ xác nhận (captcha) không mở
 
-Gói `.deb`, `.rpm` và Flatpak đã kèm sẵn thành phần này. Với AppImage hoặc tar.gz, cài thêm:
+Gói `.deb`, `.rpm` và Flatpak tự cài sẵn thành phần này. Với AppImage hoặc tar.gz, cài thêm:
 
 ```sh
 # Ubuntu / Debian / Mint
