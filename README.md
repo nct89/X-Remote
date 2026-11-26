@@ -20,12 +20,12 @@ Tải gói tại [trang Releases](https://github.com/nct89/X-Remote/releases/lat
 
 | Hệ điều hành | Tải tệp |
 |---|---|
-| Ubuntu 22.04 trở lên, Debian 12 trở lên, Linux Mint 21+, Pop!_OS, Zorin | `x-remote_0.1.6_amd64.deb` |
-| Fedora, RHEL / Rocky Linux / AlmaLinux 9 trở lên | `x-remote-0.1.6-1.x86_64.rpm` |
-| openSUSE Leap 15.6, Tumbleweed | `x-remote-0.1.6-1.x86_64.rpm` |
+| Ubuntu 22.04 trở lên, Debian 12 trở lên, Linux Mint 21+, Pop!_OS, Zorin | `x-remote_0.1.7_amd64.deb` |
+| Fedora, RHEL / Rocky Linux / AlmaLinux 9 trở lên | `x-remote-0.1.7-1.x86_64.rpm` |
+| openSUSE Leap 15.6, Tumbleweed | `x-remote-0.1.7-1.x86_64.rpm` |
 | Bản Linux bất kỳ có Flatpak | `X-Remote.flatpak` |
 | Bản Linux bất kỳ, không muốn cài vào hệ thống | `X-Remote-x86_64.AppImage` |
-| Bản Linux bất kỳ, cài vào thư mục người dùng | `x-remote-0.1.6-linux-x86_64.tar.gz` |
+| Bản Linux bất kỳ, cài vào thư mục người dùng | `x-remote-0.1.7-linux-x86_64.tar.gz` |
 | macOS 11 trở lên (Intel và Apple Silicon) | `X-Remote-0.1.0-macos-universal.dmg` |
 
 **Nên chọn `.deb`, `.rpm` hoặc Flatpak:** các gói này tự cài luôn những thành phần đi kèm (thư viện đồ hoạ, cửa sổ xác nhận captcha, thành phần chia sẻ màn hình trên Wayland). AppImage và tar.gz có thể cần cài thêm, xem [Cửa sổ xác nhận (captcha) không mở](#cửa-sổ-xác-nhận-captcha-không-mở).
@@ -39,7 +39,7 @@ Mở **Terminal** trong thư mục chứa tệp vừa tải (thường là `~/Do
 ### Ubuntu / Debian / Linux Mint / Pop!_OS
 
 ```sh
-sudo apt install ./x-remote_0.1.6_amd64.deb
+sudo apt install ./x-remote_0.1.7_amd64.deb
 ```
 
 Hoặc nhấp đúp tệp `.deb` để cài bằng trình quản lý phần mềm.
@@ -47,13 +47,13 @@ Hoặc nhấp đúp tệp `.deb` để cài bằng trình quản lý phần mề
 ### Fedora / RHEL / Rocky Linux / AlmaLinux
 
 ```sh
-sudo dnf install ./x-remote-0.1.6-1.x86_64.rpm
+sudo dnf install ./x-remote-0.1.7-1.x86_64.rpm
 ```
 
 ### openSUSE
 
 ```sh
-sudo zypper install --allow-unsigned-rpm ./x-remote-0.1.6-1.x86_64.rpm
+sudo zypper install --allow-unsigned-rpm ./x-remote-0.1.7-1.x86_64.rpm
 ```
 
 Gói chưa được ký số nên cần thêm `--allow-unsigned-rpm`.
@@ -77,8 +77,8 @@ chmod +x X-Remote-x86_64.AppImage
 ### Tarball (cài vào `~/.local`, không cần quyền root)
 
 ```sh
-tar xf x-remote-0.1.6-linux-x86_64.tar.gz
-./x-remote-0.1.6-linux-x86_64/install.sh
+tar xf x-remote-0.1.7-linux-x86_64.tar.gz
+./x-remote-0.1.7-linux-x86_64/install.sh
 ```
 
 Sau khi cài, mở **X-Remote** từ menu ứng dụng hoặc chạy lệnh `x-remote`. Nếu báo không tìm thấy lệnh, thêm `~/.local/bin` vào `PATH`.
